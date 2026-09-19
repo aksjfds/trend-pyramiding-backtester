@@ -19,11 +19,10 @@ def _annualized_sharpe(equity: pd.Series, bars_per_year: float) -> float:
     return float(returns.mean() / returns.std(ddof=1) * math.sqrt(bars_per_year))
 
 
-def summarize(
+def summarize_equity(
     equity_curve: pd.DataFrame,
-    trades: pd.DataFrame,
     initial_cash: float,
-) -> dict[str, float | int]:
+) -> dict[str, float]:
     equity = equity_curve["equity"].astype(float)
     final_equity = float(equity.iloc[-1]) if len(equity) else float(initial_cash)
     total_return = final_equity / initial_cash - 1.0
@@ -34,6 +33,26 @@ def summarize(
         bars_per_year = 365.25 * 24 * 3600 / median_seconds if median_seconds > 0 else 365.25
     else:
         bars_per_year = 365.25
+
+    summary = {
+        "initial_cash": float(initial_cash),
+        "final_equity": final_equity,
+        "total_return_pct": total_return * 100.0,
+        "max_drawdown_pct": _max_drawdown(equity) * 100.0,
+        "sharpe": _annualized_sharpe(equity, bars_per_year),
+    }
+    for key, value in list(summary.items()):
+        if not np.isfinite(value):
+            summary[key] = 999999.0 if value > 0 else -999999.0
+    return summary
+
+
+def summarize(
+    equity_curve: pd.DataFrame,
+    trades: pd.DataFrame,
+    initial_cash: float,
+) -> dict[str, float | int]:
+    summary: dict[str, float | int] = summarize_equity(equity_curve, initial_cash)
 
     if trades.empty:
         win_rate = 0.0
@@ -49,17 +68,14 @@ def summarize(
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
         avg_r = float(trades["r_multiple"].mean())
 
-    summary = {
-        "initial_cash": float(initial_cash),
-        "final_equity": final_equity,
-        "total_return_pct": total_return * 100.0,
-        "max_drawdown_pct": _max_drawdown(equity) * 100.0,
-        "sharpe": _annualized_sharpe(equity, bars_per_year),
-        "trades": int(len(trades)),
-        "win_rate_pct": win_rate * 100.0,
-        "profit_factor": profit_factor,
-        "average_r": avg_r,
-    }
+    summary.update(
+        {
+            "trades": int(len(trades)),
+            "win_rate_pct": win_rate * 100.0,
+            "profit_factor": profit_factor,
+            "average_r": avg_r,
+        }
+    )
     for key, value in list(summary.items()):
         if isinstance(value, float) and not np.isfinite(value):
             summary[key] = 999999.0 if value > 0 else -999999.0
