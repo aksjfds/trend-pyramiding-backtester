@@ -86,6 +86,21 @@ jobs:
             --summary artifacts/summary.json \
             --baseline benchmarks/baseline.json
 
+      - name: Render trade-history charts
+        run: |
+          if [[ "${{ steps.mode.outputs.real_hype }}" == "true" ]]; then
+            MARKET_CSV="artifacts/HYPE_1h.csv"
+          else
+            MARKET_CSV="data/regression_1h.csv"
+          fi
+
+          python scripts/plot_backtest.py \
+            --csv "${MARKET_CSV}" \
+            --events artifacts/events.csv \
+            --equity artifacts/equity_curve.csv \
+            --output-dir artifacts/charts \
+            --bars-per-chart 720
+
       - name: Build release notes
         run: |
           python - <<'PY'
@@ -103,6 +118,9 @@ jobs:
           sha = os.environ["GITHUB_SHA"][:7]
           run_number = os.environ["GITHUB_RUN_NUMBER"]
           run_attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = f"backtest-r{run_number}-a{run_attempt}-{sha}"
+          chart_files = sorted(Path("artifacts/charts").glob("*.png"))
 
           lines = [
               f"# Backtest #{run_number} (attempt {run_attempt})",
@@ -137,11 +155,36 @@ jobs:
                   f"- Profit factor: `{summary['profit_factor']:.6f}`",
                   f"- Average R: `{summary['average_r']:.6f}`",
                   "",
-                  "Attached files:",
+                  "## Trade history charts",
+                  "",
+                  "Legend: Entry = blue triangle, Add = purple dot, "
+                  "Exit = black triangle, Stop = orange dashed line.",
+                  "",
+              ]
+          )
+
+          for index, chart in enumerate(chart_files, start=1):
+              asset_url = (
+                  f"https://github.com/{repo}/releases/download/{tag}/{chart.name}"
+              )
+              lines.extend(
+                  [
+                      f"### Chart {index}",
+                      "",
+                      f"![Trade history chart {index}]({asset_url})",
+                      "",
+                  ]
+              )
+
+          lines.extend(
+              [
+                  "## Attached files",
+                  "",
                   "- `summary.json`",
                   "- `equity_curve.csv`",
                   "- `trades.csv`",
                   "- `events.csv`",
+                  f"- `{len(chart_files)} trade-history PNG chart(s)`",
               ]
           )
           if metadata:
@@ -151,6 +194,7 @@ jobs:
                       "- `HYPE_1h.csv`",
                   ]
               )
+
           Path("artifacts/release_notes.md").write_text(
               "\n".join(lines) + "\n",
               encoding="utf-8",
@@ -164,11 +208,14 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           TAG="backtest-r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${SHORT_SHA}"
+          shopt -s nullglob
+          CHARTS=(artifacts/charts/*.png)
           ASSETS=(
             artifacts/summary.json
             artifacts/equity_curve.csv
             artifacts/trades.csv
             artifacts/events.csv
+            "${CHARTS[@]}"
           )
 
           if [[ -f artifacts/market_metadata.json ]]; then
