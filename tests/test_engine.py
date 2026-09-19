@@ -6,7 +6,6 @@ import pandas as pd
 
 from trend_pyramiding.engine import BacktestConfig, run_backtest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
