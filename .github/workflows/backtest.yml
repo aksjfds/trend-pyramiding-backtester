@@ -2,6 +2,7 @@ name: Strategy Backtest
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -103,112 +104,11 @@ jobs:
             --summary artifacts/summary.json \
             --baseline benchmarks/baseline.json
 
-      - name: Render trade-history charts
-        run: |
-          python scripts/plot_backtest.py \
-            --csv "${{ steps.mode.outputs.market_csv }}" \
-            --events artifacts/events.csv \
-            --trades artifacts/trades.csv \
-            --output-dir artifacts/charts \
-            --days-per-chart 180
-
       - name: Build release notes
         run: |
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          summary = json.loads(Path("artifacts/summary.json").read_text(encoding="utf-8"))
-          metadata_path = Path("artifacts/market_metadata.json")
-          metadata = (
-              json.loads(metadata_path.read_text(encoding="utf-8"))
-              if metadata_path.exists()
-              else None
-          )
-          sha = os.environ["GITHUB_SHA"][:7]
-          run_number = os.environ["GITHUB_RUN_NUMBER"]
-          run_attempt = os.environ["GITHUB_RUN_ATTEMPT"]
-          repo = os.environ["GITHUB_REPOSITORY"]
-          tag = f"backtest-v0.{run_number}.{run_attempt}"
-          chart_files = sorted(Path("artifacts/charts").glob("*.png"))
-          market_files = sorted(Path("artifacts").glob("*_1h.csv"))
-
-          lines = [
-              f"# Backtest #{run_number} (attempt {run_attempt})",
-              "",
-              f"- Commit: `{sha}`",
-          ]
-          if metadata:
-              lines.extend(
-                  [
-                      f"- Market: `{metadata['market']}`",
-                      f"- Interval: `{metadata['interval']}`",
-                      f"- Period: `{metadata['first_candle_open']}` to "
-                      f"`{metadata['last_candle_close']}`",
-                      f"- Bars: `{metadata['bars']}`",
-                      "- Entry signal: `EMA20 + close breakout above prior 20-bar high`",
-                      "- Market data source: `Hyperliquid candleSnapshot API`",
-                  ]
-              )
-          else:
-              lines.append("- Dataset: `deterministic regression fixture`")
-
-          lines.extend(
-              [
-                  "",
-                  f"- Initial equity: `{summary['initial_cash']:.4f}`",
-                  f"- Final equity: `{summary['final_equity']:.4f}`",
-                  f"- Total return: `{summary['total_return_pct']:.6f}%`",
-                  f"- Max drawdown: `{summary['max_drawdown_pct']:.6f}%`",
-                  f"- Sharpe: `{summary['sharpe']:.6f}`",
-                  f"- Trades: `{summary['trades']}`",
-                  f"- Win rate: `{summary['win_rate_pct']:.6f}%`",
-                  f"- Profit factor: `{summary['profit_factor']:.6f}`",
-                  f"- Average R: `{summary['average_r']:.6f}`",
-                  "",
-                  "## Trade history charts",
-                  "",
-                  "Charts use 1D candles. Only the maximum-net-PnL trade and "
-                  "minimum-net-PnL trade are marked; all other trades are hidden.",
-                  "",
-              ]
-          )
-
-          for index, chart in enumerate(chart_files, start=1):
-              asset_url = (
-                  f"https://github.com/{repo}/releases/download/{tag}/{chart.name}"
-              )
-              lines.extend(
-                  [
-                      f"### Chart {index}",
-                      "",
-                      f"![Trade history chart {index}]({asset_url})",
-                      "",
-                  ]
-              )
-
-          lines.extend(
-              [
-                  "## Attached files",
-                  "",
-                  "- `summary.json`",
-                  "- `equity_curve.csv`",
-                  "- `trades.csv`",
-                  "- `events.csv`",
-                  f"- `{len(chart_files)} trade-history PNG chart(s)`",
-              ]
-          )
-          if metadata:
-              lines.append("- `market_metadata.json`")
-          for market_file in market_files:
-              lines.append(f"- `{market_file.name}`")
-
-          Path("artifacts/release_notes.md").write_text(
-              "\n".join(lines) + "\n",
-              encoding="utf-8",
-          )
-          PY
+          python scripts/build_release_notes.py \
+            --artifacts-dir artifacts \
+            --output artifacts/release_notes.md
 
       - name: Publish backtest release
         env:
@@ -218,14 +118,15 @@ jobs:
           SHORT_SHA="${GITHUB_SHA::7}"
           TAG="backtest-v0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
           shopt -s nullglob
-          CHARTS=(artifacts/charts/*.png)
           MARKET_FILES=(artifacts/*_1h.csv)
           ASSETS=(
             artifacts/summary.json
+            artifacts/benchmark_summary.json
+            artifacts/comparison.json
             artifacts/equity_curve.csv
+            artifacts/benchmark_equity_curve.csv
             artifacts/trades.csv
             artifacts/events.csv
-            "${CHARTS[@]}"
             "${MARKET_FILES[@]}"
           )
 

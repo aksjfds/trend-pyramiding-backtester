@@ -6,6 +6,7 @@ import tomllib
 from dataclasses import fields
 from pathlib import Path
 
+from .benchmark import compare_to_benchmark, run_buy_and_hold_benchmark
 from .engine import BacktestConfig, run_backtest
 
 
@@ -38,8 +39,12 @@ def main() -> None:
     if args.command == "backtest":
         cfg = _config_from_toml(args.config)
         result = run_backtest(args.csv, cfg, signal_column=args.signal_column)
+        benchmark = run_buy_and_hold_benchmark(args.csv, cfg)
+        comparison = compare_to_benchmark(result.summary, benchmark.summary)
+
         out = Path(args.output_dir)
         out.mkdir(parents=True, exist_ok=True)
+
         (out / "summary.json").write_text(
             json.dumps(result.summary, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -47,7 +52,27 @@ def main() -> None:
         result.equity_curve.to_csv(out / "equity_curve.csv", index=False)
         result.trades.to_csv(out / "trades.csv", index=False)
         result.events.to_csv(out / "events.csv", index=False)
-        print(json.dumps(result.summary, indent=2))
+
+        (out / "benchmark_summary.json").write_text(
+            json.dumps(benchmark.summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        benchmark.equity_curve.to_csv(out / "benchmark_equity_curve.csv", index=False)
+        (out / "comparison.json").write_text(
+            json.dumps(comparison, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        print(
+            json.dumps(
+                {
+                    "strategy": result.summary,
+                    "benchmark": benchmark.summary,
+                    "comparison": comparison,
+                },
+                indent=2,
+            )
+        )
 
 
 if __name__ == "__main__":
