@@ -24,8 +24,27 @@ def load_events(path: str | Path) -> pd.DataFrame:
     return events
 
 
+def load_extreme_trades(path: str | Path) -> tuple[set[int], dict[int, str]]:
+    trades = pd.read_csv(path)
+    if trades.empty:
+        return set(), {}
+
+    trades["net_pnl"] = pd.to_numeric(trades["net_pnl"], errors="raise")
+    best_idx = trades["net_pnl"].idxmax()
+    worst_idx = trades["net_pnl"].idxmin()
+
+    best_id = int(trades.loc[best_idx, "trade_id"])
+    worst_id = int(trades.loc[worst_idx, "trade_id"])
+
+    selected = {best_id, worst_id}
+    labels = {best_id: "max_profit"}
+    if worst_id != best_id:
+        labels[worst_id] = "max_loss"
+    return selected, labels
+
+
 def resample_daily(market: pd.DataFrame) -> pd.DataFrame:
-    daily = (
+    return (
         market.set_index("timestamp")
         .resample("1D", closed="left", label="left")
         .agg(
@@ -38,7 +57,6 @@ def resample_daily(market: pd.DataFrame) -> pd.DataFrame:
         .dropna(subset=["open", "high", "low", "close"])
         .reset_index()
     )
-    return daily
 
 
 def draw_candles(ax: plt.Axes, frame: pd.DataFrame) -> None:
@@ -73,6 +91,7 @@ def add_trade_arrows(
     ax: plt.Axes,
     frame: pd.DataFrame,
     events: pd.DataFrame,
+    trade_labels: dict[int, str],
 ) -> None:
     if events.empty:
         return
@@ -90,54 +109,53 @@ def add_trade_arrows(
 
     gap = price_range * 0.022
     arrow_length = price_range * 0.055
-
-    styles = {
-        "entry": {
-            "color": "#2563eb",
-            "direction": "up",
-        },
-        "exit": {
-            "color": "#111827",
-            "direction": "down",
-        },
+    colors = {
+        "max_profit": "#16a34a",
+        "max_loss": "#dc2626",
     }
 
-    for event_type, style in styles.items():
-        subset = events[events["event"] == event_type].copy()
-        for row in subset.itertuples(index=False):
-            x = positions.get(row.timestamp.floor("D"))
-            if x is None:
-                continue
+    for row in events.itertuples(index=False):
+        trade_id = int(row.trade_id)
+        trade_type = trade_labels.get(trade_id)
+        if trade_type is None:
+            continue
 
-            candle = frame.iloc[x]
-            if style["direction"] == "up":
-                tip_y = float(candle["low"]) - gap
-                tail_y = tip_y - arrow_length
-            else:
-                tip_y = float(candle["high"]) + gap
-                tail_y = tip_y + arrow_length
+        x = positions.get(row.timestamp.floor("D"))
+        if x is None:
+            continue
 
-            ax.annotate(
-                "",
-                xy=(x, tip_y),
-                xytext=(x, tail_y),
-                arrowprops={
-                    "arrowstyle": "-|>",
-                    "color": style["color"],
-                    "linewidth": 1.8,
-                    "mutation_scale": 13,
-                    "shrinkA": 0,
-                    "shrinkB": 0,
-                },
-                annotation_clip=False,
-                zorder=7,
-            )
+        candle = frame.iloc[x]
+        if row.event == "entry":
+            tip_y = float(candle["low"]) - gap
+            tail_y = tip_y - arrow_length
+        elif row.event == "exit":
+            tip_y = float(candle["high"]) + gap
+            tail_y = tip_y + arrow_length
+        else:
+            continue
+
+        ax.annotate(
+            "",
+            xy=(x, tip_y),
+            xytext=(x, tail_y),
+            arrowprops={
+                "arrowstyle": "-|>",
+                "color": colors[trade_type],
+                "linewidth": 2.0,
+                "mutation_scale": 14,
+                "shrinkA": 0,
+                "shrinkB": 0,
+            },
+            annotation_clip=False,
+            zorder=7,
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv", required=True)
     parser.add_argument("--events", required=True)
+    parser.add_argument("--trades", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--days-per-chart", type=int, default=180)
     args = parser.parse_args()
@@ -150,9 +168,15 @@ def main() -> None:
     market = market.sort_values("timestamp").reset_index(drop=True)
     daily_market = resample_daily(market)
 
+    selected_trade_ids, trade_labels = load_extreme_trades(args.trades)
     events = load_events(args.events)
-    if not events.empty:
-        events = events[events["event"].isin(["entry", "exit"])].copy()
+    if not events.empty and selected_trade_ids:
+        events = events[
+            events["trade_id"].astype(int).isin(selected_trade_ids)
+            & events["event"].isin(["entry", "exit"])
+        ].copy()
+    else:
+        events = events.iloc[0:0].copy()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +196,7 @@ def main() -> None:
 
         fig, ax = plt.subplots(figsize=(18, 8))
         draw_candles(ax, chunk)
-        add_trade_arrows(ax, chunk, chunk_events)
+        add_trade_arrows(ax, chunk, chunk_events, trade_labels)
 
         tick_count = min(12, len(chunk))
         if tick_count > 1:
@@ -193,22 +217,16 @@ def main() -> None:
             Line2D(
                 [0],
                 [0],
-                marker="^",
-                color="none",
-                markerfacecolor="#2563eb",
-                markeredgecolor="#2563eb",
-                markersize=8,
-                label="Entry arrow below candle",
+                color="#16a34a",
+                linewidth=2.0,
+                label="Max-profit trade",
             ),
             Line2D(
                 [0],
                 [0],
-                marker="v",
-                color="none",
-                markerfacecolor="#111827",
-                markeredgecolor="#111827",
-                markersize=8,
-                label="Exit arrow above candle",
+                color="#dc2626",
+                linewidth=2.0,
+                label="Max-loss trade",
             ),
         ]
 

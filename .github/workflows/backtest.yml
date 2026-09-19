@@ -108,6 +108,7 @@ jobs:
           python scripts/plot_backtest.py \
             --csv "${{ steps.mode.outputs.market_csv }}" \
             --events artifacts/events.csv \
+            --trades artifacts/trades.csv \
             --output-dir artifacts/charts \
             --days-per-chart 180
 
@@ -168,8 +169,8 @@ jobs:
                   "",
                   "## Trade history charts",
                   "",
-                  "Charts use 1D candles. Only first Entry and final Exit are shown; "
-                  "Add and Stop events are intentionally hidden.",
+                  "Charts use 1D candles. Only the maximum-net-PnL trade and "
+                  "minimum-net-PnL trade are marked; all other trades are hidden.",
                   "",
               ]
           )
