@@ -35,10 +35,43 @@ jobs:
       - name: Unit tests
         run: pytest
 
+      - name: Select backtest mode
+        id: mode
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "${COMMIT_MESSAGE}" == "Run HYPE 1H backtest from 2026-05-01" ]]; then
+            echo "real_hype=true" >> "${GITHUB_OUTPUT}"
+            echo "release_title=HYPE 1H Backtest" >> "${GITHUB_OUTPUT}"
+          else
+            echo "real_hype=false" >> "${GITHUB_OUTPUT}"
+            echo "release_title=Regression Backtest" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Fetch HYPE 1H market data
+        if: steps.mode.outputs.real_hype == 'true'
+        run: |
+          python scripts/fetch_hyperliquid_candles.py \
+            --coin HYPE \
+            --interval 1h \
+            --start 2026-05-01T00:00:00Z \
+            --output artifacts/HYPE_1h.csv \
+            --metadata artifacts/market_metadata.json
+
       - name: Generate deterministic regression market
+        if: steps.mode.outputs.real_hype != 'true'
         run: python scripts/generate_fixture.py --output data/regression_1h.csv
 
-      - name: Backtest
+      - name: Backtest HYPE
+        if: steps.mode.outputs.real_hype == 'true'
+        run: |
+          pyramid-backtest backtest \
+            --csv artifacts/HYPE_1h.csv \
+            --config config/default.toml \
+            --output-dir artifacts
+
+      - name: Backtest regression market
+        if: steps.mode.outputs.real_hype != 'true'
         run: |
           pyramid-backtest backtest \
             --csv data/regression_1h.csv \
@@ -47,6 +80,7 @@ jobs:
             --output-dir artifacts
 
       - name: Performance regression gate
+        if: steps.mode.outputs.real_hype != 'true'
         run: |
           python scripts/check_backtest.py \
             --summary artifacts/summary.json \
@@ -60,6 +94,12 @@ jobs:
           from pathlib import Path
 
           summary = json.loads(Path("artifacts/summary.json").read_text(encoding="utf-8"))
+          metadata_path = Path("artifacts/market_metadata.json")
+          metadata = (
+              json.loads(metadata_path.read_text(encoding="utf-8"))
+              if metadata_path.exists()
+              else None
+          )
           sha = os.environ["GITHUB_SHA"][:7]
           run_number = os.environ["GITHUB_RUN_NUMBER"]
           run_attempt = os.environ["GITHUB_RUN_ATTEMPT"]
@@ -68,37 +108,80 @@ jobs:
               f"# Backtest #{run_number} (attempt {run_attempt})",
               "",
               f"- Commit: `{sha}`",
-              f"- Final equity: `{summary['final_equity']:.4f}`",
-              f"- Total return: `{summary['total_return_pct']:.6f}%`",
-              f"- Max drawdown: `{summary['max_drawdown_pct']:.6f}%`",
-              f"- Trades: `{summary['trades']}`",
-              "",
-              "Attached files:",
-              "- `summary.json`",
-              "- `equity_curve.csv`",
-              "- `trades.csv`",
-              "- `events.csv`",
           ]
-          Path("artifacts/release_notes.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          if metadata:
+              lines.extend(
+                  [
+                      f"- Market: `{metadata['market']}`",
+                      f"- Interval: `{metadata['interval']}`",
+                      f"- Period: `{metadata['first_candle_open']}` to "
+                      f"`{metadata['last_candle_close']}`",
+                      f"- Bars: `{metadata['bars']}`",
+                      "- Entry signal: `EMA20 + close breakout above prior 20-bar high`",
+                      "- Market data source: `Hyperliquid candleSnapshot API`",
+                  ]
+              )
+          else:
+              lines.append("- Dataset: `deterministic regression fixture`")
+
+          lines.extend(
+              [
+                  "",
+                  f"- Initial equity: `{summary['initial_cash']:.4f}`",
+                  f"- Final equity: `{summary['final_equity']:.4f}`",
+                  f"- Total return: `{summary['total_return_pct']:.6f}%`",
+                  f"- Max drawdown: `{summary['max_drawdown_pct']:.6f}%`",
+                  f"- Sharpe: `{summary['sharpe']:.6f}`",
+                  f"- Trades: `{summary['trades']}`",
+                  f"- Win rate: `{summary['win_rate_pct']:.6f}%`",
+                  f"- Profit factor: `{summary['profit_factor']:.6f}`",
+                  f"- Average R: `{summary['average_r']:.6f}`",
+                  "",
+                  "Attached files:",
+                  "- `summary.json`",
+                  "- `equity_curve.csv`",
+                  "- `trades.csv`",
+                  "- `events.csv`",
+              ]
+          )
+          if metadata:
+              lines.extend(
+                  [
+                      "- `market_metadata.json`",
+                      "- `HYPE_1h.csv`",
+                  ]
+              )
+          Path("artifacts/release_notes.md").write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
           PY
 
       - name: Publish backtest release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TITLE_PREFIX: ${{ steps.mode.outputs.release_title }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           TAG="backtest-r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${SHORT_SHA}"
+          ASSETS=(
+            artifacts/summary.json
+            artifacts/equity_curve.csv
+            artifacts/trades.csv
+            artifacts/events.csv
+          )
+
+          if [[ -f artifacts/market_metadata.json ]]; then
+            ASSETS+=(artifacts/market_metadata.json artifacts/HYPE_1h.csv)
+          fi
 
           git tag "${TAG}" "${GITHUB_SHA}"
           git push origin "refs/tags/${TAG}"
 
           gh release create "${TAG}" \
-            artifacts/summary.json \
-            artifacts/equity_curve.csv \
-            artifacts/trades.csv \
-            artifacts/events.csv \
+            "${ASSETS[@]}" \
             --verify-tag \
-            --title "Backtest #${GITHUB_RUN_NUMBER} · ${SHORT_SHA}" \
+            --title "${RELEASE_TITLE_PREFIX} #${GITHUB_RUN_NUMBER} · ${SHORT_SHA}" \
             --notes-file artifacts/release_notes.md
 
       - name: Upload backtest artifacts
