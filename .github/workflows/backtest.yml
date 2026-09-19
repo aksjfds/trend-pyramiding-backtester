@@ -9,9 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  test-and-backtest:
+  real-market-backtest:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message != 'Update HYPE and XAU historical data'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -36,111 +37,109 @@ jobs:
       - name: Unit tests
         run: pytest
 
-      - name: Select backtest mode
-        id: mode
-        env:
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+      - name: Fetch HYPE real 1H history
         run: |
-          if [[ "${COMMIT_MESSAGE}" == "Run XAU 1H backtest 2026-04-15 through 2026-08-01" ]]; then
-            echo "mode=xau" >> "${GITHUB_OUTPUT}"
-            echo "release_title=XAU 1H Backtest" >> "${GITHUB_OUTPUT}"
-            echo "market_csv=artifacts/XAU_1h.csv" >> "${GITHUB_OUTPUT}"
-          elif [[ "${COMMIT_MESSAGE}" == "Run HYPE 1H backtest from 2026-05-01" ]]; then
-            echo "mode=hype" >> "${GITHUB_OUTPUT}"
-            echo "release_title=HYPE 1H Backtest" >> "${GITHUB_OUTPUT}"
-            echo "market_csv=artifacts/HYPE_1h.csv" >> "${GITHUB_OUTPUT}"
-          else
-            echo "mode=regression" >> "${GITHUB_OUTPUT}"
-            echo "release_title=Regression Backtest" >> "${GITHUB_OUTPUT}"
-            echo "market_csv=data/regression_1h.csv" >> "${GITHUB_OUTPUT}"
-          fi
+          mkdir -p artifacts/HYPE
+          python scripts/fetch_hyperliquid_candles.py \
+            --coin HYPE \
+            --interval 1h \
+            --start 2026-05-01T00:00:00Z \
+            --output artifacts/HYPE/HYPE_1h.csv \
+            --metadata artifacts/HYPE/market_metadata.json
 
-      - name: Fetch XAU 1H market data
-        if: steps.mode.outputs.mode == 'xau'
+      - name: Fetch XAU real 1H history
         run: |
+          mkdir -p artifacts/XAU
           python scripts/fetch_hyperliquid_candles.py \
             --coin xyz:GOLD \
             --interval 1h \
             --start 2026-04-15T00:00:00Z \
             --end 2026-08-02T00:00:00Z \
-            --output artifacts/XAU_1h.csv \
-            --metadata artifacts/market_metadata.json
+            --output artifacts/XAU/XAU_1h.csv \
+            --metadata artifacts/XAU/market_metadata.json
 
-      - name: Fetch HYPE 1H market data
-        if: steps.mode.outputs.mode == 'hype'
+      - name: Commit real market history snapshots
+        if: github.event_name == 'push' && github.event.head_commit.message == 'Store HYPE and XAU historical data'
         run: |
-          python scripts/fetch_hyperliquid_candles.py \
-            --coin HYPE \
-            --interval 1h \
-            --start 2026-05-01T00:00:00Z \
-            --output artifacts/HYPE_1h.csv \
-            --metadata artifacts/market_metadata.json
+          mkdir -p data/markets
+          cp artifacts/HYPE/HYPE_1h.csv data/markets/HYPE_1h.csv
+          cp artifacts/HYPE/market_metadata.json data/markets/HYPE_metadata.json
+          cp artifacts/XAU/XAU_1h.csv data/markets/XAU_1h.csv
+          cp artifacts/XAU/market_metadata.json data/markets/XAU_metadata.json
 
-      - name: Generate deterministic regression market
-        if: steps.mode.outputs.mode == 'regression'
-        run: python scripts/generate_fixture.py --output data/regression_1h.csv
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/markets
+          if ! git diff --cached --quiet; then
+            git commit -m "Update HYPE and XAU historical data"
+            git push origin HEAD:main
+          fi
 
-      - name: Backtest live market
-        if: steps.mode.outputs.mode != 'regression'
-        run: |
-          pyramid-backtest backtest \
-            --csv "${{ steps.mode.outputs.market_csv }}" \
-            --config config/default.toml \
-            --output-dir artifacts
-
-      - name: Backtest regression market
-        if: steps.mode.outputs.mode == 'regression'
+      - name: Backtest HYPE
         run: |
           pyramid-backtest backtest \
-            --csv data/regression_1h.csv \
+            --csv artifacts/HYPE/HYPE_1h.csv \
             --config config/default.toml \
-            --signal-column signal_long \
-            --output-dir artifacts
+            --output-dir artifacts/HYPE
 
-      - name: Performance regression gate
-        if: steps.mode.outputs.mode == 'regression'
+      - name: Backtest XAU
         run: |
-          python scripts/check_backtest.py \
-            --summary artifacts/summary.json \
-            --baseline benchmarks/baseline.json
+          pyramid-backtest backtest \
+            --csv artifacts/XAU/XAU_1h.csv \
+            --config config/default.toml \
+            --output-dir artifacts/XAU
 
-      - name: Build release notes
+      - name: Build combined release notes
         run: |
-          python scripts/build_release_notes.py \
-            --artifacts-dir artifacts \
+          python scripts/build_multi_market_release.py \
+            --root artifacts \
             --output artifacts/release_notes.md
 
-      - name: Publish backtest release
+      - name: Package release files
+        run: |
+          for MARKET in HYPE XAU; do
+            cp "artifacts/${MARKET}/summary.json" "artifacts/${MARKET}_summary.json"
+            cp "artifacts/${MARKET}/benchmark_summary.json" "artifacts/${MARKET}_benchmark_summary.json"
+            cp "artifacts/${MARKET}/comparison.json" "artifacts/${MARKET}_comparison.json"
+            cp "artifacts/${MARKET}/equity_curve.csv" "artifacts/${MARKET}_equity_curve.csv"
+            cp "artifacts/${MARKET}/benchmark_equity_curve.csv" "artifacts/${MARKET}_benchmark_equity_curve.csv"
+            cp "artifacts/${MARKET}/trades.csv" "artifacts/${MARKET}_trades.csv"
+            cp "artifacts/${MARKET}/events.csv" "artifacts/${MARKET}_events.csv"
+            cp "artifacts/${MARKET}/market_metadata.json" "artifacts/${MARKET}_market_metadata.json"
+            cp "artifacts/${MARKET}/${MARKET}_1h.csv" "artifacts/${MARKET}_1h.csv"
+          done
+
+      - name: Publish real-market release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TITLE_PREFIX: ${{ steps.mode.outputs.release_title }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           TAG="backtest-v0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
-          shopt -s nullglob
-          MARKET_FILES=(artifacts/*_1h.csv)
-          ASSETS=(
-            artifacts/summary.json
-            artifacts/benchmark_summary.json
-            artifacts/comparison.json
-            artifacts/equity_curve.csv
-            artifacts/benchmark_equity_curve.csv
-            artifacts/trades.csv
-            artifacts/events.csv
-            "${MARKET_FILES[@]}"
-          )
-
-          if [[ -f artifacts/market_metadata.json ]]; then
-            ASSETS+=(artifacts/market_metadata.json)
-          fi
 
           git tag "${TAG}" "${GITHUB_SHA}"
           git push origin "refs/tags/${TAG}"
 
           gh release create "${TAG}" \
-            "${ASSETS[@]}" \
+            artifacts/HYPE_summary.json \
+            artifacts/HYPE_benchmark_summary.json \
+            artifacts/HYPE_comparison.json \
+            artifacts/HYPE_equity_curve.csv \
+            artifacts/HYPE_benchmark_equity_curve.csv \
+            artifacts/HYPE_trades.csv \
+            artifacts/HYPE_events.csv \
+            artifacts/HYPE_market_metadata.json \
+            artifacts/HYPE_1h.csv \
+            artifacts/XAU_summary.json \
+            artifacts/XAU_benchmark_summary.json \
+            artifacts/XAU_comparison.json \
+            artifacts/XAU_equity_curve.csv \
+            artifacts/XAU_benchmark_equity_curve.csv \
+            artifacts/XAU_trades.csv \
+            artifacts/XAU_events.csv \
+            artifacts/XAU_market_metadata.json \
+            artifacts/XAU_1h.csv \
             --verify-tag \
-            --title "${RELEASE_TITLE_PREFIX} #${GITHUB_RUN_NUMBER} · ${SHORT_SHA}" \
+            --title "HYPE + XAU Real-Market Backtest #${GITHUB_RUN_NUMBER} · ${SHORT_SHA}" \
             --notes-file artifacts/release_notes.md \
             --latest
 
@@ -148,6 +147,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-${{ github.sha }}
+          name: real-market-backtest-${{ github.sha }}
           path: artifacts/
           retention-days: 30
