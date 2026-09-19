@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test-and-backtest:
@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,6 +52,57 @@ jobs:
           python scripts/check_backtest.py \
             --summary artifacts/summary.json \
             --baseline benchmarks/baseline.json
+
+      - name: Build release notes
+        if: github.event_name != 'pull_request'
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary = json.loads(Path("artifacts/summary.json").read_text(encoding="utf-8"))
+          sha = os.environ["GITHUB_SHA"][:7]
+          run_number = os.environ["GITHUB_RUN_NUMBER"]
+          run_attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+
+          lines = [
+              f"# Backtest #{run_number} (attempt {run_attempt})",
+              "",
+              f"- Commit: `{sha}`",
+              f"- Final equity: `{summary['final_equity']:.4f}`",
+              f"- Total return: `{summary['total_return_pct']:.6f}%`",
+              f"- Max drawdown: `{summary['max_drawdown_pct']:.6f}%`",
+              f"- Trades: `{summary['trades']}`",
+              "",
+              "Attached files:",
+              "- `summary.json`",
+              "- `equity_curve.csv`",
+              "- `trades.csv`",
+              "- `events.csv`",
+          ]
+          Path("artifacts/release_notes.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Publish backtest release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAG="backtest-r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${SHORT_SHA}"
+
+          git tag "${TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${TAG}"
+
+          gh release create "${TAG}" \
+            artifacts/summary.json \
+            artifacts/equity_curve.csv \
+            artifacts/trades.csv \
+            artifacts/events.csv \
+            --verify-tag \
+            --title "Backtest #${GITHUB_RUN_NUMBER} · ${SHORT_SHA}" \
+            --notes-file artifacts/release_notes.md
 
       - name: Upload backtest artifacts
         if: always()
