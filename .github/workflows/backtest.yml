@@ -108,9 +108,8 @@ jobs:
           python scripts/plot_backtest.py \
             --csv "${{ steps.mode.outputs.market_csv }}" \
             --events artifacts/events.csv \
-            --equity artifacts/equity_curve.csv \
             --output-dir artifacts/charts \
-            --bars-per-chart 720
+            --days-per-chart 180
 
       - name: Build release notes
         run: |
@@ -169,8 +168,8 @@ jobs:
                   "",
                   "## Trade history charts",
                   "",
-                  "Legend: Entry = blue triangle, Add = purple dot, "
-                  "Exit = black triangle, Stop = orange dashed line.",
+                  "Charts use 1D candles. Only first Entry and final Exit are shown; "
+                  "Add and Stop events are intentionally hidden.",
                   "",
               ]
           )
