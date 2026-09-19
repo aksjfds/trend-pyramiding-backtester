@@ -128,6 +128,11 @@ def main() -> None:
     parser.add_argument("--coin", required=True)
     parser.add_argument("--interval", default="1h", choices=sorted(INTERVAL_MS))
     parser.add_argument("--start", required=True)
+    parser.add_argument(
+        "--end",
+        default=None,
+        help="exclusive UTC end time; defaults to the current open interval",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--metadata", required=True)
     args = parser.parse_args()
@@ -139,8 +144,16 @@ def main() -> None:
         raise SystemExit("start must align to the candle interval")
 
     now = datetime.now(timezone.utc)
-    current_interval_open_ms = int(now.timestamp() * 1000) // step_ms * step_ms
-    end_ms = current_interval_open_ms - 1
+    if args.end is None:
+        current_interval_open_ms = int(now.timestamp() * 1000) // step_ms * step_ms
+        end_exclusive_ms = current_interval_open_ms
+    else:
+        end = parse_utc(args.end)
+        end_exclusive_ms = int(end.timestamp() * 1000)
+        if end_exclusive_ms % step_ms != 0:
+            raise SystemExit("end must align to the candle interval")
+
+    end_ms = end_exclusive_ms - 1
     if end_ms < start_ms:
         raise SystemExit("requested range has no fully closed candles")
 
@@ -173,6 +186,7 @@ def main() -> None:
         "coin": args.coin,
         "interval": args.interval,
         "requested_start": iso_utc(start_ms),
+        "requested_end_exclusive": iso_utc(end_exclusive_ms),
         "first_candle_open": iso_utc(int(candles[0]["t"])),
         "last_candle_open": iso_utc(int(candles[-1]["t"])),
         "last_candle_close": iso_utc(int(candles[-1]["T"])),

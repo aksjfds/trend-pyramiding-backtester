@@ -40,16 +40,33 @@ jobs:
         env:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          if [[ "${COMMIT_MESSAGE}" == "Run HYPE 1H backtest from 2026-05-01" ]]; then
-            echo "real_hype=true" >> "${GITHUB_OUTPUT}"
+          if [[ "${COMMIT_MESSAGE}" == "Run XAU 1H backtest 2026-04-15 through 2026-08-01" ]]; then
+            echo "mode=xau" >> "${GITHUB_OUTPUT}"
+            echo "release_title=XAU 1H Backtest" >> "${GITHUB_OUTPUT}"
+            echo "market_csv=artifacts/XAU_1h.csv" >> "${GITHUB_OUTPUT}"
+          elif [[ "${COMMIT_MESSAGE}" == "Run HYPE 1H backtest from 2026-05-01" ]]; then
+            echo "mode=hype" >> "${GITHUB_OUTPUT}"
             echo "release_title=HYPE 1H Backtest" >> "${GITHUB_OUTPUT}"
+            echo "market_csv=artifacts/HYPE_1h.csv" >> "${GITHUB_OUTPUT}"
           else
-            echo "real_hype=false" >> "${GITHUB_OUTPUT}"
+            echo "mode=regression" >> "${GITHUB_OUTPUT}"
             echo "release_title=Regression Backtest" >> "${GITHUB_OUTPUT}"
+            echo "market_csv=data/regression_1h.csv" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Fetch XAU 1H market data
+        if: steps.mode.outputs.mode == 'xau'
+        run: |
+          python scripts/fetch_hyperliquid_candles.py \
+            --coin xyz:GOLD \
+            --interval 1h \
+            --start 2026-04-15T00:00:00Z \
+            --end 2026-08-02T00:00:00Z \
+            --output artifacts/XAU_1h.csv \
+            --metadata artifacts/market_metadata.json
+
       - name: Fetch HYPE 1H market data
-        if: steps.mode.outputs.real_hype == 'true'
+        if: steps.mode.outputs.mode == 'hype'
         run: |
           python scripts/fetch_hyperliquid_candles.py \
             --coin HYPE \
@@ -59,19 +76,19 @@ jobs:
             --metadata artifacts/market_metadata.json
 
       - name: Generate deterministic regression market
-        if: steps.mode.outputs.real_hype != 'true'
+        if: steps.mode.outputs.mode == 'regression'
         run: python scripts/generate_fixture.py --output data/regression_1h.csv
 
-      - name: Backtest HYPE
-        if: steps.mode.outputs.real_hype == 'true'
+      - name: Backtest live market
+        if: steps.mode.outputs.mode != 'regression'
         run: |
           pyramid-backtest backtest \
-            --csv artifacts/HYPE_1h.csv \
+            --csv "${{ steps.mode.outputs.market_csv }}" \
             --config config/default.toml \
             --output-dir artifacts
 
       - name: Backtest regression market
-        if: steps.mode.outputs.real_hype != 'true'
+        if: steps.mode.outputs.mode == 'regression'
         run: |
           pyramid-backtest backtest \
             --csv data/regression_1h.csv \
@@ -80,7 +97,7 @@ jobs:
             --output-dir artifacts
 
       - name: Performance regression gate
-        if: steps.mode.outputs.real_hype != 'true'
+        if: steps.mode.outputs.mode == 'regression'
         run: |
           python scripts/check_backtest.py \
             --summary artifacts/summary.json \
@@ -88,14 +105,8 @@ jobs:
 
       - name: Render trade-history charts
         run: |
-          if [[ "${{ steps.mode.outputs.real_hype }}" == "true" ]]; then
-            MARKET_CSV="artifacts/HYPE_1h.csv"
-          else
-            MARKET_CSV="data/regression_1h.csv"
-          fi
-
           python scripts/plot_backtest.py \
-            --csv "${MARKET_CSV}" \
+            --csv "${{ steps.mode.outputs.market_csv }}" \
             --events artifacts/events.csv \
             --equity artifacts/equity_curve.csv \
             --output-dir artifacts/charts \
@@ -121,6 +132,7 @@ jobs:
           repo = os.environ["GITHUB_REPOSITORY"]
           tag = f"backtest-r{run_number}-a{run_attempt}-{sha}"
           chart_files = sorted(Path("artifacts/charts").glob("*.png"))
+          market_files = sorted(Path("artifacts").glob("*_1h.csv"))
 
           lines = [
               f"# Backtest #{run_number} (attempt {run_attempt})",
@@ -188,12 +200,9 @@ jobs:
               ]
           )
           if metadata:
-              lines.extend(
-                  [
-                      "- `market_metadata.json`",
-                      "- `HYPE_1h.csv`",
-                  ]
-              )
+              lines.append("- `market_metadata.json`")
+          for market_file in market_files:
+              lines.append(f"- `{market_file.name}`")
 
           Path("artifacts/release_notes.md").write_text(
               "\n".join(lines) + "\n",
@@ -210,16 +219,18 @@ jobs:
           TAG="backtest-r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${SHORT_SHA}"
           shopt -s nullglob
           CHARTS=(artifacts/charts/*.png)
+          MARKET_FILES=(artifacts/*_1h.csv)
           ASSETS=(
             artifacts/summary.json
             artifacts/equity_curve.csv
             artifacts/trades.csv
             artifacts/events.csv
             "${CHARTS[@]}"
+            "${MARKET_FILES[@]}"
           )
 
           if [[ -f artifacts/market_metadata.json ]]; then
-            ASSETS+=(artifacts/market_metadata.json artifacts/HYPE_1h.csv)
+            ASSETS+=(artifacts/market_metadata.json)
           fi
 
           git tag "${TAG}" "${GITHUB_SHA}"
