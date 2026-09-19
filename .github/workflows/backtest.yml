@@ -130,7 +130,7 @@ jobs:
           run_number = os.environ["GITHUB_RUN_NUMBER"]
           run_attempt = os.environ["GITHUB_RUN_ATTEMPT"]
           repo = os.environ["GITHUB_REPOSITORY"]
-          tag = f"backtest-r{run_number}-a{run_attempt}-{sha}"
+          tag = f"backtest-v0.{run_number}.{run_attempt}"
           chart_files = sorted(Path("artifacts/charts").glob("*.png"))
           market_files = sorted(Path("artifacts").glob("*_1h.csv"))
 
@@ -216,7 +216,7 @@ jobs:
           RELEASE_TITLE_PREFIX: ${{ steps.mode.outputs.release_title }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          TAG="backtest-r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${SHORT_SHA}"
+          TAG="backtest-v0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
           shopt -s nullglob
           CHARTS=(artifacts/charts/*.png)
           MARKET_FILES=(artifacts/*_1h.csv)
@@ -240,7 +240,8 @@ jobs:
             "${ASSETS[@]}" \
             --verify-tag \
             --title "${RELEASE_TITLE_PREFIX} #${GITHUB_RUN_NUMBER} · ${SHORT_SHA}" \
-            --notes-file artifacts/release_notes.md
+            --notes-file artifacts/release_notes.md \
+            --latest
 
       - name: Upload backtest artifacts
         if: always()
