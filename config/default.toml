@@ -5,19 +5,23 @@ risk_per_trade = 0.01
 max_position_pct = 1.0
 
 atr_period = 14
-atr_stop_mult = 2.0
 structure_lookback = 8
 structure_buffer_atr = 0.10
+max_initial_stop_atr = 4.0
 
 ema_period = 20
 entry_breakout_lookback = 20
-add_breakout_lookback = 10
-add_step_atr = 0.75
-require_add_breakout = false
+trend_filter_timeframe = "1D"
+trend_filter_ema_period = 20
+trend_filter_slope_lookback = 3
 
-trail_atr_mult = 2.25
-trail_activation_r = 1.0
-break_even_r = 1.0
+add_breakout_lookback = 20
+add_step_atr = 0.75
+require_add_breakout = true
+
+trail_atr_mult = 3.0
+trail_activation_r = 2.0
+break_even_r = 1.5
 
 risk_weights = [0.30, 0.30, 0.20, 0.20]
 allocation_weights = [0.30, 0.30, 0.20, 0.20]

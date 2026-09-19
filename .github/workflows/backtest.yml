@@ -10,7 +10,7 @@ permissions:
 jobs:
   test-and-backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -40,16 +40,24 @@ jobs:
         env:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          if [[ "${COMMIT_MESSAGE}" == "Run XAU 1H backtest 2026-04-15 through 2026-08-01" ]]; then
+          if [[ "${COMMIT_MESSAGE}" == "v1.1" ]]; then
+            echo "mode=regression" >> "${GITHUB_OUTPUT}"
+            echo "v11=true" >> "${GITHUB_OUTPUT}"
+            echo "release_title=Strategy v1.1 Validation" >> "${GITHUB_OUTPUT}"
+            echo "market_csv=data/regression_1h.csv" >> "${GITHUB_OUTPUT}"
+          elif [[ "${COMMIT_MESSAGE}" == "Run XAU 1H backtest 2026-04-15 through 2026-08-01" ]]; then
             echo "mode=xau" >> "${GITHUB_OUTPUT}"
+            echo "v11=false" >> "${GITHUB_OUTPUT}"
             echo "release_title=XAU 1H Backtest" >> "${GITHUB_OUTPUT}"
             echo "market_csv=artifacts/XAU_1h.csv" >> "${GITHUB_OUTPUT}"
           elif [[ "${COMMIT_MESSAGE}" == "Run HYPE 1H backtest from 2026-05-01" ]]; then
             echo "mode=hype" >> "${GITHUB_OUTPUT}"
+            echo "v11=false" >> "${GITHUB_OUTPUT}"
             echo "release_title=HYPE 1H Backtest" >> "${GITHUB_OUTPUT}"
             echo "market_csv=artifacts/HYPE_1h.csv" >> "${GITHUB_OUTPUT}"
           else
             echo "mode=regression" >> "${GITHUB_OUTPUT}"
+            echo "v11=false" >> "${GITHUB_OUTPUT}"
             echo "release_title=Regression Backtest" >> "${GITHUB_OUTPUT}"
             echo "market_csv=data/regression_1h.csv" >> "${GITHUB_OUTPUT}"
           fi
@@ -103,6 +111,54 @@ jobs:
             --summary artifacts/summary.json \
             --baseline benchmarks/baseline.json
 
+      - name: Fetch v1.1 validation markets
+        if: steps.mode.outputs.v11 == 'true'
+        run: |
+          python scripts/fetch_hyperliquid_candles.py \
+            --coin HYPE \
+            --interval 1h \
+            --start 2026-05-01T00:00:00Z \
+            --output artifacts/HYPE_1h.csv \
+            --metadata artifacts/HYPE_market_metadata.json
+
+          python scripts/fetch_hyperliquid_candles.py \
+            --coin xyz:GOLD \
+            --interval 1h \
+            --start 2026-04-15T00:00:00Z \
+            --end 2026-08-02T00:00:00Z \
+            --output artifacts/XAU_1h.csv \
+            --metadata artifacts/XAU_market_metadata.json
+
+      - name: Backtest v1.1 HYPE
+        if: steps.mode.outputs.v11 == 'true'
+        run: |
+          pyramid-backtest backtest \
+            --csv artifacts/HYPE_1h.csv \
+            --config config/default.toml \
+            --output-dir artifacts/v11/HYPE
+
+          pyramid-backtest walk-forward \
+            --csv artifacts/HYPE_1h.csv \
+            --config config/default.toml \
+            --folds 4 \
+            --warmup-bars 720 \
+            --output-dir artifacts/v11/HYPE
+
+      - name: Backtest v1.1 XAU
+        if: steps.mode.outputs.v11 == 'true'
+        run: |
+          pyramid-backtest backtest \
+            --csv artifacts/XAU_1h.csv \
+            --config config/default.toml \
+            --output-dir artifacts/v11/XAU
+
+          pyramid-backtest walk-forward \
+            --csv artifacts/XAU_1h.csv \
+            --config config/default.toml \
+            --folds 4 \
+            --warmup-bars 720 \
+            --output-dir artifacts/v11/XAU
+
       - name: Render trade-history charts
         run: |
           python scripts/plot_backtest.py \
@@ -112,7 +168,48 @@ jobs:
             --output-dir artifacts/charts \
             --days-per-chart 180
 
+      - name: Render v1.1 validation charts
+        if: steps.mode.outputs.v11 == 'true'
+        run: |
+          python scripts/plot_backtest.py \
+            --csv artifacts/HYPE_1h.csv \
+            --events artifacts/v11/HYPE/events.csv \
+            --trades artifacts/v11/HYPE/trades.csv \
+            --output-dir artifacts/v11/HYPE/charts \
+            --days-per-chart 180
+
+          python scripts/plot_backtest.py \
+            --csv artifacts/XAU_1h.csv \
+            --events artifacts/v11/XAU/events.csv \
+            --trades artifacts/v11/XAU/trades.csv \
+            --output-dir artifacts/v11/XAU/charts \
+            --days-per-chart 180
+
+      - name: Build v1.1 validation report
+        if: steps.mode.outputs.v11 == 'true'
+        run: |
+          python scripts/build_v11_report.py \
+            --root artifacts/v11 \
+            --output-json artifacts/v11_validation.json \
+            --output-md artifacts/v11_validation.md
+
+          cp artifacts/v11/HYPE/summary.json artifacts/HYPE_summary.json
+          cp artifacts/v11/HYPE/walk_forward.json artifacts/HYPE_walk_forward.json
+          cp artifacts/v11/HYPE/walk_forward_folds.csv artifacts/HYPE_walk_forward_folds.csv
+          cp artifacts/v11/XAU/summary.json artifacts/XAU_summary.json
+          cp artifacts/v11/XAU/walk_forward.json artifacts/XAU_walk_forward.json
+          cp artifacts/v11/XAU/walk_forward_folds.csv artifacts/XAU_walk_forward_folds.csv
+
+          for file in artifacts/v11/HYPE/charts/*.png; do
+            cp "$file" "artifacts/HYPE_$(basename "$file")"
+          done
+          for file in artifacts/v11/XAU/charts/*.png; do
+            cp "$file" "artifacts/XAU_$(basename "$file")"
+          done
+
       - name: Build release notes
+        env:
+          V11: ${{ steps.mode.outputs.v11 }}
         run: |
           python - <<'PY'
           import json
@@ -147,7 +244,8 @@ jobs:
                       f"- Period: `{metadata['first_candle_open']}` to "
                       f"`{metadata['last_candle_close']}`",
                       f"- Bars: `{metadata['bars']}`",
-                      "- Entry signal: `EMA20 + close breakout above prior 20-bar high`",
+                      "- Default signal: `completed 1D EMA20 rising 3 days + "
+                      "1H EMA20 + 20-bar close breakout`",
                       "- Market data source: `Hyperliquid candleSnapshot API`",
                   ]
               )
@@ -167,6 +265,22 @@ jobs:
                   f"- Profit factor: `{summary['profit_factor']:.6f}`",
                   f"- Average R: `{summary['average_r']:.6f}`",
                   "",
+              ]
+          )
+
+          validation_md = Path("artifacts/v11_validation.md")
+          if validation_md.exists():
+              lines.extend(
+                  [
+                      "## v1.1 cross-market validation",
+                      "",
+                      validation_md.read_text(encoding="utf-8").strip(),
+                      "",
+                  ]
+              )
+
+          lines.extend(
+              [
                   "## Trade history charts",
                   "",
                   "Charts use 1D candles. Only the maximum-net-PnL trade and "
@@ -196,13 +310,21 @@ jobs:
                   "- `equity_curve.csv`",
                   "- `trades.csv`",
                   "- `events.csv`",
-                  f"- `{len(chart_files)} trade-history PNG chart(s)`",
+                  f"- `{len(chart_files)} main trade-history PNG chart(s)`",
               ]
           )
           if metadata:
               lines.append("- `market_metadata.json`")
           for market_file in market_files:
               lines.append(f"- `{market_file.name}`")
+          if os.environ.get("V11") == "true":
+              lines.extend(
+                  [
+                      "- `v11_validation.json`",
+                      "- HYPE/XAU full summary and rolling-OOS files",
+                      "- HYPE/XAU 1D max-profit/max-loss charts",
+                  ]
+              )
 
           Path("artifacts/release_notes.md").write_text(
               "\n".join(lines) + "\n",
@@ -220,6 +342,11 @@ jobs:
           shopt -s nullglob
           CHARTS=(artifacts/charts/*.png)
           MARKET_FILES=(artifacts/*_1h.csv)
+          VALIDATION_FILES=()
+          for file in             artifacts/v11_validation.json             artifacts/HYPE_summary.json             artifacts/HYPE_walk_forward.json             artifacts/HYPE_walk_forward_folds.csv             artifacts/XAU_summary.json             artifacts/XAU_walk_forward.json             artifacts/XAU_walk_forward_folds.csv             artifacts/HYPE_trade_history_*.png             artifacts/XAU_trade_history_*.png; do
+            [[ -e "$file" ]] && VALIDATION_FILES+=("$file")
+          done
+
           ASSETS=(
             artifacts/summary.json
             artifacts/equity_curve.csv
@@ -227,6 +354,7 @@ jobs:
             artifacts/events.csv
             "${CHARTS[@]}"
             "${MARKET_FILES[@]}"
+            "${VALIDATION_FILES[@]}"
           )
 
           if [[ -f artifacts/market_metadata.json ]]; then

@@ -7,7 +7,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .indicators import atr, prior_rolling_high, rolling_structure_low
+from .indicators import (
+    atr,
+    completed_timeframe_trend_filter,
+    prior_rolling_high,
+    rolling_structure_low,
+)
 from .metrics import summarize
 from .signals import resolve_entry_signal
 
@@ -21,19 +26,24 @@ class BacktestConfig:
     max_position_pct: float = 1.0
 
     atr_period: int = 14
-    atr_stop_mult: float = 2.0
+    atr_stop_mult: float = 2.0  # deprecated compatibility field; v1.1 uses structure stops
     structure_lookback: int = 8
     structure_buffer_atr: float = 0.10
+    max_initial_stop_atr: float = 4.0
 
     ema_period: int = 20
     entry_breakout_lookback: int = 20
-    add_breakout_lookback: int = 10
-    add_step_atr: float = 0.75
-    require_add_breakout: bool = False
+    trend_filter_timeframe: str = "1D"
+    trend_filter_ema_period: int = 20
+    trend_filter_slope_lookback: int = 3
 
-    trail_atr_mult: float = 2.25
-    trail_activation_r: float = 1.0
-    break_even_r: float = 1.0
+    add_breakout_lookback: int = 20
+    add_step_atr: float = 0.75
+    require_add_breakout: bool = True
+
+    trail_atr_mult: float = 3.0
+    trail_activation_r: float = 2.0
+    break_even_r: float = 1.5
 
     risk_weights: tuple[float, ...] = (0.30, 0.30, 0.20, 0.20)
     allocation_weights: tuple[float, ...] = (0.30, 0.30, 0.20, 0.20)
@@ -45,6 +55,24 @@ class BacktestConfig:
             raise ValueError("risk_per_trade must be in (0, 0.10]")
         if not 0 < self.max_position_pct <= 1.0:
             raise ValueError("max_position_pct must be in (0, 1]")
+        if self.atr_period < 1 or self.structure_lookback < 1:
+            raise ValueError("ATR and structure lookbacks must be >= 1")
+        if self.atr_stop_mult <= 0:
+            raise ValueError("atr_stop_mult must be > 0")
+        if self.structure_buffer_atr < 0:
+            raise ValueError("structure_buffer_atr must be >= 0")
+        if self.max_initial_stop_atr <= 0:
+            raise ValueError("max_initial_stop_atr must be > 0")
+        if self.ema_period < 1 or self.entry_breakout_lookback < 1:
+            raise ValueError("entry lookbacks must be >= 1")
+        if not self.trend_filter_timeframe.strip():
+            raise ValueError("trend_filter_timeframe must not be empty")
+        if self.trend_filter_ema_period < 1 or self.trend_filter_slope_lookback < 1:
+            raise ValueError("trend filter parameters must be >= 1")
+        if self.add_breakout_lookback < 1 or self.add_step_atr <= 0:
+            raise ValueError("add parameters must be > 0")
+        if self.trail_atr_mult <= 0 or self.trail_activation_r <= 0 or self.break_even_r <= 0:
+            raise ValueError("trailing and break-even parameters must be > 0")
         if len(self.risk_weights) != len(self.allocation_weights):
             raise ValueError("risk_weights and allocation_weights must have equal length")
         if not self.risk_weights:
@@ -62,6 +90,7 @@ class PendingOrder:
     kind: str
     stop: float
     signal_time: pd.Timestamp
+    signal_atr: float
 
 
 @dataclass
@@ -82,6 +111,14 @@ class Position:
     entry_fees: float = 0.0
     entry_notional: float = 0.0
     events: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class BacktestResult:
+    summary: dict[str, float | int]
+    equity_curve: pd.DataFrame
+    trades: pd.DataFrame
+    events: pd.DataFrame
 
 
 def _load_frame(data: pd.DataFrame | str | Path) -> pd.DataFrame:
@@ -109,6 +146,15 @@ def _load_frame(data: pd.DataFrame | str | Path) -> pd.DataFrame:
     return frame
 
 
+def _utc_timestamp(value: str | pd.Timestamp | None) -> pd.Timestamp | None:
+    if value is None:
+        return None
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
 def _buy_fill(raw_price: float, slippage_bps: float) -> float:
     return raw_price * (1.0 + slippage_bps / 10_000.0)
 
@@ -118,14 +164,25 @@ def _sell_fill(raw_price: float, slippage_bps: float) -> float:
 
 
 def _initial_stop(row: pd.Series, cfg: BacktestConfig) -> float | None:
+    """Use structural invalidation; reject trades whose structure is too far away."""
     if not np.isfinite(row["atr"]) or not np.isfinite(row["structure_low"]):
         return None
-    structure_stop = row["structure_low"] - cfg.structure_buffer_atr * row["atr"]
-    atr_stop = row["close"] - cfg.atr_stop_mult * row["atr"]
-    stop = max(float(structure_stop), float(atr_stop))
-    if not np.isfinite(stop) or stop <= 0 or stop >= row["close"]:
+
+    structure_stop = float(
+        row["structure_low"] - cfg.structure_buffer_atr * row["atr"]
+    )
+    distance = float(row["close"] - structure_stop)
+    max_distance = float(cfg.max_initial_stop_atr * row["atr"])
+
+    if (
+        not np.isfinite(structure_stop)
+        or structure_stop <= 0
+        or structure_stop >= row["close"]
+        or distance <= 0
+        or distance > max_distance
+    ):
         return None
-    return stop
+    return structure_stop
 
 
 def _open_risk(position: Position) -> float:
@@ -171,19 +228,40 @@ def run_backtest(
     cfg: BacktestConfig | None = None,
     *,
     signal_column: str | None = None,
+    entry_start: str | pd.Timestamp | None = None,
+    entry_end: str | pd.Timestamp | None = None,
 ) -> BacktestResult:
     cfg = cfg or BacktestConfig()
     cfg.validate()
     frame = _load_frame(data)
 
+    start_ts = _utc_timestamp(entry_start)
+    end_ts = _utc_timestamp(entry_end)
+    if start_ts is not None and end_ts is not None and start_ts >= end_ts:
+        raise ValueError("entry_start must be before entry_end")
+
     frame["atr"] = atr(frame, cfg.atr_period)
     frame["structure_low"] = rolling_structure_low(frame["low"], cfg.structure_lookback)
     frame["add_prior_high"] = prior_rolling_high(frame["high"], cfg.add_breakout_lookback)
+
+    trend_filter: pd.Series | None = None
+    if signal_column is None:
+        trend_filter = completed_timeframe_trend_filter(
+            frame,
+            timeframe=cfg.trend_filter_timeframe,
+            ema_period=cfg.trend_filter_ema_period,
+            slope_lookback=cfg.trend_filter_slope_lookback,
+        )
+        frame["trend_filter_ok"] = trend_filter
+    else:
+        frame["trend_filter_ok"] = True
+
     frame["entry_signal"] = resolve_entry_signal(
         frame,
         signal_column,
         cfg.ema_period,
         cfg.entry_breakout_lookback,
+        trend_filter=trend_filter,
     )
 
     cash = cfg.initial_cash
@@ -246,7 +324,7 @@ def run_backtest(
         position = None
         pending = None
 
-    for i, row in frame.iterrows():
+    for _, row in frame.iterrows():
         ts = row["timestamp"]
         o = float(row["open"])
         h = float(row["high"])
@@ -261,9 +339,16 @@ def run_backtest(
         if pending is not None:
             order = pending
             pending = None
-            if order.kind == "entry" and position is None:
+            entry_window_open = end_ts is None or ts < end_ts
+            if order.kind == "entry" and position is None and entry_window_open:
                 fill = _buy_fill(o, cfg.slippage_bps)
-                if fill > order.stop:
+                max_fill_distance = cfg.max_initial_stop_atr * order.signal_atr
+                if (
+                    fill > order.stop
+                    and np.isfinite(order.signal_atr)
+                    and order.signal_atr > 0
+                    and fill - order.stop <= max_fill_distance
+                ):
                     trade_equity = cash
                     risk_budget = trade_equity * cfg.risk_per_trade
                     qty = _size_tranche(
@@ -367,12 +452,27 @@ def run_backtest(
                 and close >= position.last_add_reference + cfg.add_step_atr * row["atr"]
                 and breakout_ok
             ):
-                pending = PendingOrder(kind="add", stop=position.stop, signal_time=ts)
+                pending = PendingOrder(
+                    kind="add",
+                    stop=position.stop,
+                    signal_time=ts,
+                    signal_atr=float(row["atr"]),
+                )
 
-        elif bool(row["entry_signal"]):
-            stop = _initial_stop(row, cfg)
-            if stop is not None:
-                pending = PendingOrder(kind="entry", stop=stop, signal_time=ts)
+        else:
+            in_entry_window = (
+                (start_ts is None or ts >= start_ts)
+                and (end_ts is None or ts < end_ts)
+            )
+            if in_entry_window and bool(row["entry_signal"]):
+                stop = _initial_stop(row, cfg)
+                if stop is not None:
+                    pending = PendingOrder(
+                        kind="entry",
+                        stop=stop,
+                        signal_time=ts,
+                        signal_atr=float(row["atr"]),
+                    )
 
         equity_rows.append(
             {
@@ -381,6 +481,7 @@ def run_backtest(
                 "cash": cash,
                 "position_qty": position.qty if position else 0.0,
                 "stop": position.stop if position else np.nan,
+                "trend_filter_ok": bool(row["trend_filter_ok"]),
             }
         )
 
@@ -395,13 +496,12 @@ def run_backtest(
     equity_curve = pd.DataFrame(equity_rows)
     trades_df = pd.DataFrame(trades)
     events_df = pd.DataFrame(events)
-    summary = summarize(equity_curve, trades_df, cfg.initial_cash)
+
+    summary_curve = equity_curve
+    if start_ts is not None:
+        summary_curve = summary_curve[summary_curve["timestamp"] >= start_ts].copy()
+    if end_ts is not None:
+        summary_curve = summary_curve[summary_curve["timestamp"] < end_ts].copy()
+
+    summary = summarize(summary_curve, trades_df, cfg.initial_cash)
     return BacktestResult(summary, equity_curve, trades_df, events_df)
-
-
-@dataclass
-class BacktestResult:
-    summary: dict[str, float | int]
-    equity_curve: pd.DataFrame
-    trades: pd.DataFrame
-    events: pd.DataFrame
