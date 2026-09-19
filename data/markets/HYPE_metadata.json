@@ -1,0 +1,14 @@
+{
+  "source": "Hyperliquid public API candleSnapshot",
+  "source_url": "https://api.hyperliquid.xyz/info",
+  "market": "HYPE perpetual",
+  "coin": "HYPE",
+  "interval": "1h",
+  "requested_start": "2026-05-01T00:00:00Z",
+  "requested_end_exclusive": "2026-09-19T09:00:00Z",
+  "first_candle_open": "2026-05-01T00:00:00Z",
+  "last_candle_open": "2026-09-19T08:00:00Z",
+  "last_candle_close": "2026-09-19T08:59:59.999000Z",
+  "bars": 3393,
+  "fetched_at": "2026-09-19T09:00:43.212213Z"
+}
