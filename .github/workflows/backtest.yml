@@ -2,7 +2,6 @@ name: Strategy Backtest
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -54,7 +53,6 @@ jobs:
             --baseline benchmarks/baseline.json
 
       - name: Build release notes
-        if: github.event_name != 'pull_request'
         run: |
           python - <<'PY'
           import json
@@ -85,7 +83,6 @@ jobs:
           PY
 
       - name: Publish backtest release
-        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
