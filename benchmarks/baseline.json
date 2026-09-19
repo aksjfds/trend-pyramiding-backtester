@@ -1,0 +1,5 @@
+{
+  "min_trades": 2,
+  "min_total_return_pct": 0.10,
+  "max_drawdown_pct_abs": 3.00
+}

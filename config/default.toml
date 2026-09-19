@@ -1,0 +1,23 @@
+initial_cash = 100000.0
+fee_bps = 5.0
+slippage_bps = 3.0
+risk_per_trade = 0.01
+max_position_pct = 1.0
+
+atr_period = 14
+atr_stop_mult = 2.0
+structure_lookback = 8
+structure_buffer_atr = 0.10
+
+ema_period = 20
+entry_breakout_lookback = 20
+add_breakout_lookback = 10
+add_step_atr = 0.75
+require_add_breakout = false
+
+trail_atr_mult = 2.25
+trail_activation_r = 1.0
+break_even_r = 1.0
+
+risk_weights = [0.30, 0.30, 0.20, 0.20]
+allocation_weights = [0.30, 0.30, 0.20, 0.20]

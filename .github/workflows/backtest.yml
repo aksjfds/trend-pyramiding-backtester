@@ -1,0 +1,60 @@
+name: Strategy Backtest
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest
+
+      - name: Generate deterministic regression market
+        run: python scripts/generate_fixture.py --output data/regression_1h.csv
+
+      - name: Backtest
+        run: |
+          pyramid-backtest backtest \
+            --csv data/regression_1h.csv \
+            --config config/default.toml \
+            --signal-column signal_long \
+            --output-dir artifacts
+
+      - name: Performance regression gate
+        run: |
+          python scripts/check_backtest.py \
+            --summary artifacts/summary.json \
+            --baseline benchmarks/baseline.json
+
+      - name: Upload backtest artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ github.sha }}
+          path: artifacts/
+          retention-days: 30
