@@ -69,7 +69,7 @@ def draw_candles(ax: plt.Axes, frame: pd.DataFrame) -> None:
         )
 
 
-def add_trade_markers(
+def add_trade_arrows(
     ax: plt.Axes,
     frame: pd.DataFrame,
     events: pd.DataFrame,
@@ -81,31 +81,56 @@ def add_trade_markers(
         timestamp.floor("D"): idx
         for idx, timestamp in enumerate(frame["timestamp"])
     }
+
+    visible_low = float(frame["low"].min())
+    visible_high = float(frame["high"].max())
+    price_range = visible_high - visible_low
+    if price_range <= 0:
+        price_range = max(abs(visible_high) * 0.01, 1.0)
+
+    gap = price_range * 0.022
+    arrow_length = price_range * 0.055
+
     styles = {
-        "entry": ("^", "#2563eb", 52),
-        "exit": ("v", "#111827", 52),
+        "entry": {
+            "color": "#2563eb",
+            "direction": "up",
+        },
+        "exit": {
+            "color": "#111827",
+            "direction": "down",
+        },
     }
 
-    for event_type, (marker, color, size) in styles.items():
-        subset = events[events["event"] == event_type]
-        xs: list[int] = []
-        ys: list[float] = []
+    for event_type, style in styles.items():
+        subset = events[events["event"] == event_type].copy()
         for row in subset.itertuples(index=False):
             x = positions.get(row.timestamp.floor("D"))
             if x is None:
                 continue
-            xs.append(x)
-            ys.append(float(row.price))
-        if xs:
-            ax.scatter(
-                xs,
-                ys,
-                marker=marker,
-                s=size,
-                facecolor=color,
-                edgecolor="white",
-                linewidth=0.6,
-                zorder=6,
+
+            candle = frame.iloc[x]
+            if style["direction"] == "up":
+                tip_y = float(candle["low"]) - gap
+                tail_y = tip_y - arrow_length
+            else:
+                tip_y = float(candle["high"]) + gap
+                tail_y = tip_y + arrow_length
+
+            ax.annotate(
+                "",
+                xy=(x, tip_y),
+                xytext=(x, tail_y),
+                arrowprops={
+                    "arrowstyle": "-|>",
+                    "color": style["color"],
+                    "linewidth": 1.8,
+                    "mutation_scale": 13,
+                    "shrinkA": 0,
+                    "shrinkB": 0,
+                },
+                annotation_clip=False,
+                zorder=7,
             )
 
 
@@ -147,7 +172,7 @@ def main() -> None:
 
         fig, ax = plt.subplots(figsize=(18, 8))
         draw_candles(ax, chunk)
-        add_trade_markers(ax, chunk, chunk_events)
+        add_trade_arrows(ax, chunk, chunk_events)
 
         tick_count = min(12, len(chunk))
         if tick_count > 1:
@@ -171,9 +196,9 @@ def main() -> None:
                 marker="^",
                 color="none",
                 markerfacecolor="#2563eb",
-                markeredgecolor="white",
+                markeredgecolor="#2563eb",
                 markersize=8,
-                label="Entry",
+                label="Entry arrow below candle",
             ),
             Line2D(
                 [0],
@@ -181,9 +206,9 @@ def main() -> None:
                 marker="v",
                 color="none",
                 markerfacecolor="#111827",
-                markeredgecolor="white",
+                markeredgecolor="#111827",
                 markersize=8,
-                label="Exit",
+                label="Exit arrow above candle",
             ),
         ]
 
@@ -191,6 +216,17 @@ def main() -> None:
         ax.grid(alpha=0.16, linewidth=0.5)
         ax.set_ylabel("Price")
         ax.set_xlim(-1, len(chunk))
+
+        price_low = float(chunk["low"].min())
+        price_high = float(chunk["high"].max())
+        price_range = price_high - price_low
+        if price_range <= 0:
+            price_range = max(abs(price_high) * 0.01, 1.0)
+        ax.set_ylim(
+            price_low - price_range * 0.11,
+            price_high + price_range * 0.11,
+        )
+
         ax.set_title(
             "Backtest trade history (1D candles) | "
             f"{start_time.strftime('%Y-%m-%d')} - "
