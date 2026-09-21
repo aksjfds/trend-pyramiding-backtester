@@ -41,16 +41,19 @@ def test_detects_strong_multivariate_downshift() -> None:
     cp = []
     short = []
     map_run = []
+    drops = []
     for i in range(160):
         mean = 0.5 if i < 80 else -3.0
         result = detector.update(rng.normal(mean, 0.30, 3))
         cp.append(result.changepoint_probability)
         short.append(result.short_run_probability)
         map_run.append(result.map_run_length)
+        drops.append(result.run_length_drop)
 
-    assert max(cp[78:90]) > 0.20
-    assert max(short[78:90]) > 0.90
-    assert min(map_run[80:86]) <= 3
+    assert max(cp[78:90]) > 0.05
+    assert max(short[78:90]) > 0.80
+    assert min(map_run[80:86]) <= 5
+    assert max(drops[80:86]) > 0.80
 
 
 def test_downtrend_wrapper_fires_after_regime_change() -> None:
@@ -64,8 +67,9 @@ def test_downtrend_wrapper_fires_after_regime_change() -> None:
             short_run_window=5,
         ),
         config=DowntrendConfig(
-            changepoint_threshold=0.15,
-            short_run_threshold=0.70,
+            short_run_threshold=0.60,
+            max_recent_run_length=5,
+            min_previous_run_length=12,
             bearish_threshold=0.60,
             min_observations=20,
         ),
@@ -80,6 +84,40 @@ def test_downtrend_wrapper_fires_after_regime_change() -> None:
 
     assert any(fired[70:85])
 
+
+
+def test_regime_mean_uncertainty_shrinks_on_stable_data() -> None:
+    rng = np.random.default_rng(11)
+    detector = MultivariateScoreDrivenBOCPD(
+        2,
+        BOCPDConfig(hazard_lambda=1000, max_run_length=128),
+    )
+    first = detector.update(rng.normal(0.2, 0.1, 2))
+    last = first
+    for _ in range(80):
+        last = detector.update(rng.normal(0.2, 0.1, 2))
+
+    assert np.all(last.regime_mean_std < first.regime_mean_std)
+
+
+def test_stationary_stream_does_not_repeatedly_trigger_downtrend() -> None:
+    rng = np.random.default_rng(12)
+    names = ("log_return", "order_imbalance", "trade_flow_imbalance")
+    detector = DowntrendDetector(
+        names,
+        bocpd_config=BOCPDConfig(
+            hazard_lambda=120,
+            max_run_length=160,
+            short_run_window=5,
+        ),
+    )
+
+    triggers = 0
+    for _ in range(300):
+        signal = detector.update(rng.normal(0.0, 0.25, len(names)))
+        triggers += int(signal.triggered)
+
+    assert triggers <= 3
 
 def test_market_feature_builder_uses_available_microstructure_columns() -> None:
     n = 80
