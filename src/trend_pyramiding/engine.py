@@ -9,7 +9,7 @@ import pandas as pd
 
 from .indicators import atr, prior_rolling_high, rolling_structure_low
 from .metrics import summarize
-from .signals import resolve_entry_signal
+from .signals import resolve_entry_signal, strong_close_signal
 
 
 @dataclass(frozen=True)
@@ -142,6 +142,7 @@ def _size_tranche(
     cfg: BacktestConfig,
     trade_equity: float,
     risk_budget: float,
+    recycle_risk: bool = False,
 ) -> float:
     risk_per_unit = fill_price - stop
     if risk_per_unit <= 0:
@@ -151,6 +152,15 @@ def _size_tranche(
     remaining_risk = max(risk_budget - existing_risk, 0.0)
     tranche_risk_cap = risk_budget * cfg.risk_weights[tranche_index]
     risk_cap = min(remaining_risk, tranche_risk_cap)
+    if recycle_risk:
+        # Reuse released risk within the cumulative tranche schedule, while bounding
+        # each new tranche by the largest original tranche allowance.
+        cumulative_cap = risk_budget * sum(cfg.risk_weights[: tranche_index + 1])
+        risk_cap = min(
+            remaining_risk,
+            max(cumulative_cap - existing_risk, 0.0),
+            risk_budget * max(cfg.risk_weights),
+        )
     qty_by_risk = risk_cap / risk_per_unit
 
     max_notional = trade_equity * cfg.max_position_pct
@@ -171,7 +181,11 @@ def run_backtest(
     cfg: BacktestConfig | None = None,
     *,
     signal_column: str | None = None,
+    strategy: str = "classic",
 ) -> BacktestResult:
+    if strategy not in {"classic", "confirmed-pyramid"}:
+        raise ValueError("strategy must be classic or confirmed-pyramid")
+    confirmed = strategy == "confirmed-pyramid"
     cfg = cfg or BacktestConfig()
     cfg.validate()
     frame = _load_frame(data)
@@ -185,6 +199,9 @@ def run_backtest(
         cfg.ema_period,
         cfg.entry_breakout_lookback,
     )
+
+    if confirmed:
+        frame["entry_signal"] &= strong_close_signal(frame)
 
     cash = cfg.initial_cash
     position: Position | None = None
@@ -275,6 +292,7 @@ def run_backtest(
                         cfg=cfg,
                         trade_equity=trade_equity,
                         risk_budget=risk_budget,
+                        recycle_risk=confirmed,
                     )
                     if qty > 0:
                         notional = qty * fill
@@ -312,6 +330,7 @@ def run_backtest(
                             cfg=cfg,
                             trade_equity=position.entry_equity,
                             risk_budget=position.risk_budget,
+                            recycle_risk=confirmed,
                         )
                         if qty > 0:
                             notional = qty * fill
@@ -364,6 +383,7 @@ def run_backtest(
                 position.tranches < len(cfg.risk_weights)
                 and np.isfinite(row["atr"])
                 and close > position.avg_entry
+                and (not confirmed or position.stop >= position.avg_entry)
                 and close >= position.last_add_reference + cfg.add_step_atr * row["atr"]
                 and breakout_ok
             ):

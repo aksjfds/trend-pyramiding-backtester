@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="panel-token" content="__PANEL_TOKEN__">
+<title>顺势 · OKX 策略控制台</title><link rel="stylesheet" href="/panel.css"><script defer src="/panel.js"></script>
+</head>
+<body>
+<aside class="sidebar"><a class="brand" href="/" aria-label="策略控制台首页"><span class="brand-mark">↗</span><span>顺势<span class="brand-sub">PYRAMIDING</span></span></a><div class="nav-title">工作空间</div><a class="nav active" href="#overview"><span>◫</span> 策略总览</a><a class="nav" href="#positions"><span>▤</span> 持仓与止损</a><a class="nav" href="#activity"><span>≋</span> 运行日志</a><div class="side-foot"><span class="dot"></span> 本地运行<div>OKX · USDT 永续合约</div></div></aside>
+<main id="overview">
+<header><div class="breadcrumb">工作空间 <span>/</span> 策略总览</div><div class="connection" id="connection">正在连接本机服务…</div></header>
+<div class="page-heading"><div><div class="eyebrow">STRATEGY OVERVIEW</div><h1>让趋势运行。</h1><p>启动策略，查看持仓，掌握每一次加仓与止损。</p></div><div class="badge neutral" id="run-badge" role="status">正在读取</div></div>
+<div id="error" class="notice error" role="alert" hidden></div><div id="warning" class="notice" role="status" hidden></div>
+<section class="metrics" aria-label="策略概况">
+<article class="metric"><span>账户权益 <small>USDT 估值</small></span><strong id="equity">—</strong><div id="account-time">点击“检查账户”读取</div></article>
+<article class="metric"><span>资金使用上限</span><strong id="allocation">20<span>%</span></strong><div id="budget">保证金与手续费预留</div></article>
+<article class="metric"><span>策略持仓</span><strong id="position-count">0<span> 个币对</span></strong><div id="pending">本地策略记录</div></article>
+<article class="metric"><span>策略参数</span><strong class="parameters"><span id="bar">1H</span><i>/</i><span id="leverage">2×</span></strong><div>只做多 · 逐仓 · 顺势加仓</div></article>
+</section>
+<div class="control-grid">
+<section class="card control"><div class="section-heading"><h2>运行控制</h2><span id="profile" class="tag">实盘账户</span></div>
+<label for="mode">运行方式</label><select id="mode"><option value="watch">只读观察 · 实盘账户</option><option value="demo-watch">只读观察 · 模拟账户</option><option value="demo">模拟交易</option><option value="live">实盘交易</option></select>
+<p id="mode-note" class="hint">持续检查账户与市场，不发送交易订单。</p>
+<div class="actions"><button class="primary" id="start">▶ 启动观察</button><button class="secondary" id="stop" disabled>■ 停止</button></div>
+<div class="stop-note">停止后保留已有仓位和交易所止损，移动止损暂停。</div></section>
+<section class="card runtime"><div class="section-heading"><h2>运行详情</h2><button class="text-button" id="check">检查账户 ↗</button></div>
+<dl><div><dt>API 密钥</dt><dd id="keys">正在读取…</dd></div><div><dt>本次启动</dt><dd id="started">尚未启动</dd></div><div><dt>最近活动</dt><dd id="heartbeat">—</dd></div><div><dt>账户可用 USDT</dt><dd id="available">—</dd></div><div><dt>账户持仓 / 待处理订单</dt><dd id="account-orders">—</dd></div></dl><p class="hint" id="key-note">密钥仅从启动网页时的环境变量读取，不在网页中显示。</p></section>
+</div>
+<section class="card positions" id="positions"><div class="section-heading"><div><h2>持仓与止损</h2><p class="hint">本地策略记录；停止后可能与交易所持仓不同。</p></div><span class="tag" id="market-count">待选择币对</span></div>
+<div class="table-scroll"><table><thead><tr><th>永续合约</th><th>持仓张数</th><th>平均入场价</th><th>当前止损价</th><th>加仓档数</th><th>最近处理 K 线</th></tr></thead><tbody id="market-body"></tbody></table></div>
+<div class="empty" id="empty-markets"><div class="empty-icon">▥</div><strong>策略尚无持仓记录</strong><p>首次交易启动时选择高成交额币对。可先检查账户与候选市场。</p></div></section>
+<section class="card activity" id="activity"><div class="section-heading"><div><h2>本次运行日志</h2><p class="hint">自动刷新，保留最近 300 条；历史交易事件保存在本地状态目录。</p></div><span class="tag" id="log-count">0 条</span></div><pre id="logs" aria-label="运行日志">等待启动策略，运行信息会显示在这里。</pre></section>
+<footer><span>顺势加仓 / 结构止损 / 移动止盈</span><span>关闭浏览器不停止策略；退出网页服务会请求停止策略。</span></footer>
+</main>
+</body></html>

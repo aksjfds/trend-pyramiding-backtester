@@ -50,9 +50,7 @@ comparison.json 包含：
 
 ## 安装
 
-Northflank 容器部署参见 [部署说明](docs/NORTHFLANK.md)。仓库根目录的 Dockerfile 默认运行常驻只读检查；交易状态存入持久化卷，API 密钥仅通过运行时 Secret 环境变量注入。
-
-OKX 实盘功能已提供独立命令 `pyramid-okx`，默认配置为 1H、2 倍逐仓 USDT 永续合约，总保证金及费用预留不超过本金的 20%。详见 [OKX 配置与运行说明](docs/OKX_LIVE.md)。账户只读检查与实盘启动分开，实盘需要用户明确执行 `pyramid-okx run --live`。
+OKX 实盘功能已提供独立命令 `pyramid-okx`，默认配置为 1H、2 倍逐仓 USDT 永续合约，总保证金及费用预留不超过本金的 20%。详见 [OKX 配置与运行说明](docs/OKX_LIVE.md)。账户只读检查与实盘启动分开，实盘需要明确点击网页的“启动实盘交易”，或执行 `pyramid-okx run --live`。
 
 ```bash
 python -m venv .venv
@@ -67,6 +65,19 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -e '.[dev]'
 ```
+
+## 本地网页控制台
+
+安装并配置好 OKX 环境变量后，在项目目录运行：
+
+```bash
+source .venv/bin/activate
+pyramid-web --open
+```
+
+访问 `http://127.0.0.1:8765`。网页可启动/停止只读观察、模拟交易和实盘交易，并查看账户检查结果、策略持仓、止损和最近日志。打开网页不会自动启动策略或访问账户。密钥仍只从环境变量读取。
+
+停止会等待当前操作完成，保留已有仓位和交易所止损；关闭浏览器标签不会停止策略，退出网页服务会请求停止策略。详见 [网页使用说明](docs/WEB.md)。
 
 ## 输入数据
 
@@ -102,6 +113,12 @@ pyramid-backtest backtest \
 ```
 
 如果不传 --signal-column，项目使用 EMA20 + 前 20 根高点突破作为默认演示入场信号。
+
+## 固定参数策略候选
+
+回测命令可添加 `--strategy confirmed-pyramid`，在相同数值参数下使用收盘确认、受保护后加仓和有限风险复用。默认 `classic` 及现有实盘策略保持原样。
+
+在指定 HYPE 1H 历史区间中，总收益从 20.71% 提高到 22.13%，最大回撤绝对值从 5.35% 降至 5.10%。完整条件、分段结果及复现步骤见 [策略研究说明](docs/STRATEGY_RESEARCH.md)。这些是经过迭代筛选的历史结果，不能视为独立样本外表现。
 
 ## GitHub Actions / Release
 

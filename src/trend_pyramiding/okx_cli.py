@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .live import LiveConfig, StateStore, SwapRunner, account_snapshot
 from .okx import Credentials, OKXClient, OKXError, UncertainWrite, dec, universe
-from .runtime import ProcessControl, require_persistent_state
+from .runtime import ProcessControl
 
 
 def check_account(client, config, store):
@@ -39,13 +39,13 @@ def check_account(client, config, store):
 
 
 def watch_account(client, config, store):
-    """Read-only, long-running deployment smoke check. No trading client is created."""
-    with ProcessControl() as control:
+    """Read-only account monitor. No trading client is created."""
+    with store.lock(), ProcessControl() as control:
         while not control.stop.is_set():
             try:
                 client.sync_time()
                 report = check_account(client, config, store)
-                # Routine hosted logs do not include account balances or credentials.
+                # Routine monitor logs do not include account balances or credentials.
                 print(
                     json.dumps(
                         {
@@ -170,8 +170,6 @@ def main():
             return
         if args.command == "run" and not config.demo and not args.live:
             raise ValueError("real orders require run --live; check is read-only")
-        if args.command == "run":
-            require_persistent_state(store.path.parent)
         credentials = None
         if args.command != "scan":
             credentials = Credentials.load(config.demo)

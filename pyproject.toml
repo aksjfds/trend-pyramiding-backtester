@@ -22,10 +22,13 @@ dev = [
 [project.scripts]
 pyramid-backtest = "trend_pyramiding.cli:main"
 pyramid-okx = "trend_pyramiding.okx_cli:main"
-pyramid-health = "trend_pyramiding.runtime:health_main"
+pyramid-web = "trend_pyramiding.web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+trend_pyramiding = ["panel.html", "panel.css", "panel.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

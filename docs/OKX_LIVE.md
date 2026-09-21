@@ -1,6 +1,6 @@
 # OKX 永续合约运行说明
 
-本模块接入 OKX V5 的 USDT 线性永续合约，使用原项目的多头突破、金字塔加仓和结构/ATR 移动止损逻辑。实盘需明确使用 `run --live` 启动。
+本模块接入 OKX V5 的 USDT 线性永续合约，使用原项目的多头突破、金字塔加仓和结构/ATR 移动止损逻辑。实盘需明确点击网页“启动实盘交易”或使用 `run --live` 启动。
 
 ## 当前配置
 
@@ -15,7 +15,7 @@
 
 ## 环境
 
-云端常驻部署请参阅 [Northflank 部署说明](NORTHFLANK.md)，包含持久化状态、运行时环境变量配置、健康检查和异常暂停恢复。
+本地网页控制请参阅 [网页使用说明](WEB.md)，包含启动、停止、账户检查、持仓与日志查看。
 
 ```bash
 cd /Users/a/code/trend-pyramiding-backtester
@@ -38,7 +38,7 @@ API 密钥仅从运行时环境变量读取：
 | 实盘 | `OKX_API_KEY` | `OKX_API_SECRET` | `OKX_API_PASSPHRASE` |
 | 模拟盘 | `OKX_DEMO_API_KEY` | `OKX_DEMO_API_SECRET` | `OKX_DEMO_API_PASSPHRASE` |
 
-在 Northflank 的 Environment 中设置 Runtime variables，或使用仅授权给当前服务的 Runtime Secret Group，然后重启服务。本地运行时也需事先将所选环境的三个变量注入进程环境；程序不自动加载 `.env`。不要将真实值写入代码、策略配置、构建参数或日志，也不要把密钥发到聊天或提交 Git。
+在启动命令行或网页服务前，将所选环境的三个变量注入进程环境；程序不自动加载 `.env`，不读取密钥文件。网页服务启动后新增或更改环境变量，需要重新启动网页服务。不要将真实值写入代码、策略配置、日志或 shell 历史，也不要把密钥发到聊天或提交 Git。
 
 三个变量必须全部非空，缺失时在连接 OKX 前报错；实盘与模拟盘互不回退。
 

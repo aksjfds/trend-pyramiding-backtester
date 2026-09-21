@@ -116,7 +116,7 @@ def test_check_uses_environment_credentials(config, monkeypatch, capsys, demo):
 def test_missing_environment_never_reads_old_files_or_connects(config, monkeypatch, capsys):
     for suffix in ("API_KEY", "API_SECRET", "API_PASSPHRASE"):
         monkeypatch.delenv("OKX_" + suffix, raising=False)
-    # Even a stale deployment with all old credential sources must require runtime variables.
+    # Even an old local setup with all old credential sources must require runtime variables.
     old = config.parent / "okx.credentials.toml"
     old.write_text('[live]\napi_key="old"\napi_secret="old"\npassphrase="old"\n')
     old.chmod(0o600)

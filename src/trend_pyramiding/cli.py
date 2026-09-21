@@ -33,12 +33,20 @@ def main() -> None:
     backtest.add_argument("--csv", required=True)
     backtest.add_argument("--config", default=None)
     backtest.add_argument("--signal-column", default=None)
+    backtest.add_argument(
+        "--strategy",
+        choices=["classic", "confirmed-pyramid"],
+        default="classic",
+        help="backtest policy; the same numeric config is used by both policies",
+    )
     backtest.add_argument("--output-dir", default="artifacts")
 
     args = parser.parse_args()
     if args.command == "backtest":
         cfg = _config_from_toml(args.config)
-        result = run_backtest(args.csv, cfg, signal_column=args.signal_column)
+        result = run_backtest(
+            args.csv, cfg, signal_column=args.signal_column, strategy=args.strategy
+        )
         benchmark = run_buy_and_hold_benchmark(args.csv, cfg)
         comparison = compare_to_benchmark(result.summary, benchmark.summary)
 
@@ -47,6 +55,18 @@ def main() -> None:
 
         (out / "summary.json").write_text(
             json.dumps(result.summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (out / "strategy_manifest.json").write_text(
+            json.dumps(
+                {
+                    "strategy": args.strategy,
+                    "config": vars(cfg),
+                    "signal_column": args.signal_column,
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
         result.equity_curve.to_csv(out / "equity_curve.csv", index=False)

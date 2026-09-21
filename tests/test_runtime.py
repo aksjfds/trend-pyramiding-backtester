@@ -1,8 +1,6 @@
 import json
-import os
 import signal
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -14,7 +12,6 @@ from trend_pyramiding.okx import UncertainWrite
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("PYRAMID_HEARTBEAT_FILE", str(tmp_path / "heartbeat.json"))
-    monkeypatch.delenv("PYRAMID_REQUIRE_PERSISTENT_STATE", raising=False)
 
 
 def test_sigterm_requests_stop_without_interrupting_work_and_restores_handler():
@@ -26,52 +23,6 @@ def test_sigterm_requests_stop_without_interrupting_work_and_restores_handler():
         assert json.loads(runtime.heartbeat_path().read_text())["phase"] == "ready"
     assert signal.getsignal(signal.SIGTERM) == previous
     assert json.loads(runtime.heartbeat_path().read_text())["phase"] == "stopped"
-
-
-@pytest.mark.parametrize(
-    "phase,ready,expected",
-    [
-        ("ready", False, 0),
-        ("ready", True, 0),
-        ("halted", False, 0),
-        ("halted", True, 1),
-        ("error", True, 1),
-        ("stopped", False, 1),
-    ],
-)
-def test_health_distinguishes_liveness_and_readiness(monkeypatch, phase, ready, expected):
-    import sys
-
-    with runtime.ProcessControl() as control:
-        control.update(phase)
-        monkeypatch.setattr(sys, "argv", ["pyramid-health", *(["--ready"] if ready else [])])
-        with pytest.raises(SystemExit) as exc:
-            runtime.health_main()
-        assert exc.value.code == expected
-
-
-def test_stale_heartbeat_is_unhealthy(monkeypatch):
-    import sys
-
-    runtime.heartbeat_path().write_text(
-        json.dumps({"pid": os.getpid(), "updated_at": 0, "phase": "ready"})
-    )
-    monkeypatch.setattr(sys, "argv", ["pyramid-health"])
-    with pytest.raises(SystemExit) as exc:
-        runtime.health_main()
-    assert exc.value.code == 1
-
-
-def test_trading_requires_real_mount_and_state_inside_it(tmp_path, monkeypatch):
-    monkeypatch.setenv("PYRAMID_REQUIRE_PERSISTENT_STATE", "true")
-    monkeypatch.setenv("PYRAMID_STATE_MOUNT", str(tmp_path / "data"))
-    monkeypatch.setattr(Path, "is_mount", lambda self: False)
-    with pytest.raises(ValueError, match="persistent volume"):
-        runtime.require_persistent_state(tmp_path / "data/state")
-    monkeypatch.setattr(Path, "is_mount", lambda self: True)
-    runtime.require_persistent_state(tmp_path / "data/state")
-    with pytest.raises(ValueError, match="persistent volume"):
-        runtime.require_persistent_state(tmp_path / "ephemeral")
 
 
 def test_failed_worker_latches_halt_without_erasing_uncertain_order(tmp_path, monkeypatch):

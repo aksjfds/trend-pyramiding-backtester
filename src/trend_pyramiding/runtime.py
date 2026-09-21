@@ -1,8 +1,7 @@
-"""Container lifecycle helpers. No exchange connections or trading operations."""
+"""Graceful process shutdown and local status heartbeat."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import signal
@@ -12,18 +11,8 @@ import time
 from pathlib import Path
 
 
-def require_persistent_state(path: Path):
-    if os.environ.get("PYRAMID_REQUIRE_PERSISTENT_STATE", "false").lower() != "true":
-        return
-    mount = Path(os.environ.get("PYRAMID_STATE_MOUNT", "/data")).resolve()
-    if not mount.is_mount() or not path.resolve().is_relative_to(mount):
-        raise ValueError(
-            "trading requires a persistent volume at PYRAMID_STATE_MOUNT containing the state directory"
-        )
-
-
 def heartbeat_path() -> Path:
-    return Path(os.environ.get("PYRAMID_HEARTBEAT_FILE", "/tmp/pyramid-heartbeat.json"))
+    return Path(os.environ.get("PYRAMID_HEARTBEAT_FILE", "state/okx-heartbeat.json"))
 
 
 class ProcessControl:
@@ -59,26 +48,3 @@ class ProcessControl:
         finally:
             for signum, handler in self.handlers.items():
                 signal.signal(signum, handler)
-
-
-def health_main():
-    parser = argparse.ArgumentParser(prog="pyramid-health")
-    parser.add_argument("--ready", action="store_true", help="also require successful work/checks")
-    parser.add_argument("--max-age", type=float, default=600)
-    args = parser.parse_args()
-    try:
-        status = json.loads(heartbeat_path().read_text())
-        age = time.time() - status["updated_at"]
-        os.kill(status["pid"], 0)
-        healthy = (
-            0 <= age <= args.max_age
-            and status["phase"] != "stopped"
-            and (not args.ready or status["phase"] == "ready")
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        healthy = False
-    raise SystemExit(0 if healthy else 1)
-
-
-if __name__ == "__main__":
-    health_main()
