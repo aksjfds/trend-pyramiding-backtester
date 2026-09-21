@@ -52,7 +52,7 @@ def request(app, path="/", method="GET", body=b"", login=True, **changes):
 
 
 @pytest.mark.parametrize(
-    "path", ["/", "/panel.js", "/panel.css", "/api/status", "/api/start", "/api/stop", "/api/check"]
+    "path", ["/", "/panel.js", "/panel.css", "/api/status", "/api/connectivity", "/api/start", "/api/stop", "/api/check"]
 )
 def test_every_panel_resource_requires_authentication(app, path):
     result = request(
@@ -326,3 +326,19 @@ def test_cloud_settings_use_persistent_state_and_require_auth(app):
     assert state["config"]["capital_fraction"] == 0.4
     assert state["config"]["leverage"] == 3 and state["config"]["bar"] == "2H"
     assert state["parameters"]["values"]["strategy"]["add_step_atr"] == 1.5
+
+
+def test_render_connectivity_endpoint_is_authenticated(app, monkeypatch):
+    report = {
+        "connected": True,
+        "checked_at": time.time(),
+        "latency_ms": 55,
+        "clock_skew_ms": -2,
+        "endpoint": "https://openapi.okx.com",
+        "error": None,
+    }
+    monkeypatch.setattr(app.controller, "okx_connectivity", lambda: report)
+    assert request(app, "/api/connectivity", login=False).code == 401
+    response = request(app, "/api/connectivity")
+    assert response.code == 200
+    assert json.loads(response.body) == report

@@ -373,3 +373,46 @@ def test_parameters_cannot_change_while_worker_or_external_process_runs(controll
         with pytest.raises(ValueError, match="另一个"):
             controller.save_parameters("watch", payload)
     assert not controller.store(False).path.with_suffix(".settings.json").exists()
+
+
+def test_okx_connectivity_uses_public_time_and_caches(controller, monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["base_url"] == controller.config.base_url
+            assert kwargs["timeout"] == 3
+
+        def get(self, path, *, private=True):
+            assert path == "/api/v5/public/time"
+            assert private is False
+            calls.append(path)
+            return [{"ts": str(int(time.time() * 1000))}]
+
+    monkeypatch.setattr(web, "OKXClient", FakeClient)
+    first = controller.okx_connectivity()
+    second = controller.okx_connectivity()
+
+    assert first["connected"] is True
+    assert first["latency_ms"] >= 0
+    assert first["endpoint"] == controller.config.base_url
+    assert first["error"] is None
+    assert second == first
+    assert calls == ["/api/v5/public/time"]
+
+
+def test_connectivity_http_endpoint(server, monkeypatch):
+    report = {
+        "connected": True,
+        "checked_at": time.time(),
+        "latency_ms": 42,
+        "clock_skew_ms": 3,
+        "endpoint": "https://openapi.okx.com",
+        "error": None,
+    }
+    monkeypatch.setattr(server.controller, "okx_connectivity", lambda: report)
+    headers = {"X-Panel-Token": server.token}
+    status, _, body = request(server, "GET", "/api/connectivity", **headers)
+    assert status == 200
+    assert json.loads(body) == report
+    assert request(server, "GET", "/api/connectivity")[0] == 403

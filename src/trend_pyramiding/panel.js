@@ -6,7 +6,7 @@ let marketCatalog = [], catalogProfile = null, catalogLoading = false, selection
 let chosen = new Set();
 let settingsDirty=false, settingsSaving=false, settingsProfile=null, settingsFields=[];
 const accountAttempts = {};
-let last = null, actionBusy = false, checkBusy = false, loading = false, connected = false;
+let last = null, actionBusy = false, checkBusy = false, loading = false, connected = false, networkLoading = false;
 const date = value => value ? new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN', {hour12:false}) : '—';
 const num = value => value === null || value === undefined ? '—' : Number(value).toLocaleString('zh-CN', {maximumFractionDigits:6});
 async function api(path, data) {
@@ -92,6 +92,41 @@ function render(s) {
   $('log-count').textContent = s.logs.length + ' 条';
   syncSelection(s); syncSettings(s); controls();
 }
+function renderNetwork(status) {
+  const node = $('okx-network');
+  if (status.connected) {
+    node.textContent = '已连接 · ' + Math.round(status.latency_ms) + ' ms';
+    node.className = 'network-status ok';
+    const skew = Number(status.clock_skew_ms);
+    node.title = Number.isFinite(skew) ? 'OKX 服务器时钟偏差 ' + skew + ' ms' : '';
+  } else {
+    node.textContent = '连接异常';
+    node.className = 'network-status bad';
+    node.title = status.error || '';
+  }
+  $('okx-network-time').textContent = status.checked_at ? date(status.checked_at) : '—';
+}
+
+async function refreshNetwork() {
+  if (networkLoading) return;
+  networkLoading = true;
+  const node = $('okx-network');
+  if (!node.textContent || node.textContent === '正在检测…') {
+    node.textContent = '正在检测…';
+    node.className = 'network-status checking';
+  }
+  try {
+    renderNetwork(await api('/api/connectivity'));
+  } catch (error) {
+    node.textContent = '检测失败';
+    node.className = 'network-status bad';
+    node.title = error.message;
+    $('okx-network-time').textContent = date(Date.now() / 1000);
+  } finally {
+    networkLoading = false;
+  }
+}
+
 async function refresh() {
   if (loading) return; loading=true;
   try { const s=await api('/api/status?mode='+encodeURIComponent($('mode').value)); connected=true; $('connection').textContent='服务已连接 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}); render(s);
@@ -171,7 +206,7 @@ $('save-selection').addEventListener('click',async()=>{
   } catch(error){message(error.message);}
   finally {selectionSaving=false;await refresh();controls();}
 });
-controls(); refresh(); setInterval(refresh,2000);
+controls(); refresh(); refreshNetwork(); setInterval(refresh,2000); setInterval(refreshNetwork,300000);
 
 function syncSettings(s) {
   if (!s.parameters) return;

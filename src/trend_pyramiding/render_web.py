@@ -122,6 +122,8 @@ class Application:
             if method == "GET" and path == "/api/status":
                 mode = parse_qs(env.get("QUERY_STRING", "")).get("mode", ["watch"])[0]
                 return respond(200, self.controller.snapshot(mode))
+            if method == "GET" and path == "/api/connectivity":
+                return respond(200, self.controller.okx_connectivity())
             if method == "GET" and path == "/api/instruments":
                 mode = parse_qs(env.get("QUERY_STRING", "")).get("mode", ["watch"])[0]
                 return respond(200, {"items": self.controller.catalog(mode)})

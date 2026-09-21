@@ -50,6 +50,8 @@ class Controller:
         self.checking = False
         self.catalogs = {}
         self.catalog_lock = threading.Lock()
+        self.network_lock = threading.Lock()
+        self.network_status_cache = None
         self.heartbeat = self.state_dir / "web-heartbeat.json"
 
     def redact(self, text):
@@ -73,6 +75,43 @@ class Controller:
 
     def store(self, demo):
         return StateStore(self.state_dir / f"okx-{'demo' if demo else 'live'}.json")
+
+    def okx_connectivity(self):
+        """Check public OKX REST connectivity, cached for five minutes."""
+        with self.network_lock:
+            now = time.time()
+            cached = self.network_status_cache
+            if cached and now - cached["checked_at"] < 300:
+                return dict(cached)
+
+            started = time.perf_counter()
+            before = time.time()
+            try:
+                client = OKXClient(base_url=self.config.base_url, demo=False, timeout=3)
+                rows = client.get("/api/v5/public/time", private=False)
+                after = time.time()
+                if not rows or not isinstance(rows[0], dict) or not rows[0].get("ts"):
+                    raise ValueError("OKX public time response is invalid")
+                server_time = float(rows[0]["ts"]) / 1000
+                result = {
+                    "connected": True,
+                    "checked_at": after,
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "clock_skew_ms": round((server_time - (before + after) / 2) * 1000),
+                    "endpoint": self.config.base_url,
+                    "error": None,
+                }
+            except (ValueError, RuntimeError, OSError) as exc:
+                result = {
+                    "connected": False,
+                    "checked_at": time.time(),
+                    "latency_ms": None,
+                    "clock_skew_ms": None,
+                    "endpoint": self.config.base_url,
+                    "error": self.redact(str(exc))[:500],
+                }
+            self.network_status_cache = result
+            return dict(result)
 
     def catalog(self, mode="watch"):
         demo, _ = self.profile(mode)
@@ -511,6 +550,8 @@ class Handler(BaseHTTPRequestHandler):
                 path
             ]
             self.send(200, content.encode(), kind + "; charset=utf-8")
+        elif path == "/api/connectivity":
+            self.send(200, self.server.controller.okx_connectivity())
         elif path in ("/api/status", "/api/instruments"):
             from urllib.parse import parse_qs
 
