@@ -1,0 +1,30 @@
+name: Score-Driven BOCPD
+
+on:
+  push:
+    branches:
+      - feature/scoredriven-bocpd
+    paths:
+      - "experiments/scoredriven_bocpd/**"
+      - ".github/workflows/scoredriven_bocpd.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: experiments/scoredriven_bocpd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: experiments/scoredriven_bocpd/pyproject.toml
+      - name: Install
+        run: python -m pip install -e ".[test]"
+      - name: Test
+        run: pytest
+      - name: Demo smoke test
+        run: python examples/demo.py
