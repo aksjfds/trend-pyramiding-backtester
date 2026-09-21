@@ -19,17 +19,16 @@ def _logsumexp(values: FloatArray) -> float:
 
 @dataclass(frozen=True)
 class BOCPDConfig:
-    """Configuration for the online detector.
+    """Configuration for robust score-driven AR(1) BOCPD.
 
-    hazard_lambda is the expected regime length in observations under a
-    constant hazard model. The observation model is a diagonal multivariate
-    Student-t with score-driven location, scale and AR(1) coefficient.
+    The regime mean is Bayesian and constant within a run-length hypothesis.
+    Scale and AR correlation remain observation-driven/time-varying.
     """
 
     hazard_lambda: float = 120.0
     max_run_length: int = 256
     student_df: float = 5.0
-    location_step: float = 0.08
+    mean_prior_variance: float = 1.0
     scale_step: float = 0.03
     ar_step: float = 0.03
     ar_beta: float = 0.97
@@ -37,6 +36,7 @@ class BOCPDConfig:
     min_log_scale: float = -4.0
     max_log_scale: float = 4.0
     short_run_window: int = 5
+    min_conditional_variance_ratio: float = 1e-3
 
     def __post_init__(self) -> None:
         if self.hazard_lambda <= 1.0:
@@ -45,17 +45,22 @@ class BOCPDConfig:
             raise ValueError("max_run_length must be >= 2")
         if self.student_df <= 2.0:
             raise ValueError("student_df must be > 2")
+        if self.mean_prior_variance <= 0.0:
+            raise ValueError("mean_prior_variance must be > 0")
         if not 0.0 < self.ar_beta <= 1.0:
             raise ValueError("ar_beta must be in (0, 1]")
         if not 0.0 < self.phi_max < 1.0:
             raise ValueError("phi_max must be in (0, 1)")
         if self.short_run_window < 0:
             raise ValueError("short_run_window must be >= 0")
+        if not 0.0 < self.min_conditional_variance_ratio <= 1.0:
+            raise ValueError("min_conditional_variance_ratio must be in (0, 1]")
 
 
 @dataclass
 class _HypothesisState:
     mean: FloatArray
+    mean_precision: FloatArray
     log_scale: FloatArray
     ar_latent: FloatArray
     previous: FloatArray | None = None
@@ -63,6 +68,7 @@ class _HypothesisState:
     def copy(self) -> "_HypothesisState":
         return _HypothesisState(
             mean=self.mean.copy(),
+            mean_precision=self.mean_precision.copy(),
             log_scale=self.log_scale.copy(),
             ar_latent=self.ar_latent.copy(),
             previous=None if self.previous is None else self.previous.copy(),
@@ -74,23 +80,24 @@ class BOCPDUpdate:
     changepoint_probability: float
     short_run_probability: float
     map_run_length: int
+    previous_map_run_length: int
+    run_length_drop: float
     posterior: FloatArray
     regime_mean: FloatArray
+    recent_regime_mean: FloatArray
+    regime_mean_std: FloatArray
     regime_scale: FloatArray
     ar_coefficient: FloatArray
 
 
 class MultivariateScoreDrivenBOCPD:
-    """Online BOCPD with robust score-driven AR dynamics.
+    """Online BOCPD with Bayesian regime means and score-driven AR dynamics.
 
-    Each run-length hypothesis owns a separate observation-model state. The
-    multivariate likelihood is diagonal Student-t: this deliberately avoids
-    estimating a dense covariance matrix online when order-book features are
-    numerous or collinear. Dependence through time is modeled by a bounded
-    AR(1) coefficient per feature.
-
-    This is a practical multivariate extension of score-driven autoregressive
-    BOCPD, not a verbatim implementation of any single paper.
+    Each run-length hypothesis owns a separate state. The observation model is
+    a diagonal multivariate Student-t extension. Regime means are updated via
+    Bayesian precision accumulation; scale and AR correlation use robust GAS
+    updates. This preserves mean breaks instead of allowing a constant-gain
+    location filter to absorb them.
     """
 
     def __init__(self, dimension: int, config: BOCPDConfig | None = None) -> None:
@@ -99,8 +106,10 @@ class MultivariateScoreDrivenBOCPD:
         self.dimension = dimension
         self.config = config or BOCPDConfig()
         self._hazard = 1.0 / self.config.hazard_lambda
+        prior_precision = 1.0 / self.config.mean_prior_variance
         self._base = _HypothesisState(
             mean=np.zeros(dimension, dtype=np.float64),
+            mean_precision=np.full(dimension, prior_precision, dtype=np.float64),
             log_scale=np.zeros(dimension, dtype=np.float64),
             ar_latent=np.zeros(dimension, dtype=np.float64),
         )
@@ -114,51 +123,104 @@ class MultivariateScoreDrivenBOCPD:
     def posterior(self) -> FloatArray:
         return np.exp(self._log_posterior.copy())
 
-    def _predictive_logpdf(self, state: _HypothesisState, x: FloatArray) -> float:
+    def _components(
+        self, state: _HypothesisState
+    ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
         cfg = self.config
-        scale = np.exp(state.log_scale)
+        unconditional_scale = np.exp(state.log_scale)
         phi = cfg.phi_max * np.tanh(state.ar_latent)
 
         if state.previous is None:
+            loading = np.ones(self.dimension, dtype=np.float64)
             location = state.mean
+            innovation_variance = unconditional_scale * unconditional_scale
         else:
+            loading = 1.0 - phi
             location = state.mean + phi * (state.previous - state.mean)
+            variance_ratio = np.maximum(
+                1.0 - phi * phi,
+                cfg.min_conditional_variance_ratio,
+            )
+            innovation_variance = (
+                unconditional_scale * unconditional_scale * variance_ratio
+            )
 
-        z = (x - location) / scale
-        nu = cfg.student_df
+        return location, innovation_variance, loading, phi
+
+    def _predictive_logpdf(self, state: _HypothesisState, x: FloatArray) -> float:
+        location, innovation_variance, loading, _ = self._components(state)
+
+        mean_variance = 1.0 / state.mean_precision
+        predictive_variance = innovation_variance + (
+            loading * loading * mean_variance
+        )
+        predictive_scale = np.sqrt(
+            np.maximum(predictive_variance, np.finfo(float).tiny)
+        )
+
+        z = (x - location) / predictive_scale
+        nu = self.config.student_df
         log_c = (
             math.lgamma((nu + 1.0) / 2.0)
             - math.lgamma(nu / 2.0)
             - 0.5 * math.log(nu * math.pi)
         )
-        terms = log_c - np.log(scale) - ((nu + 1.0) / 2.0) * np.log1p((z * z) / nu)
+        terms = (
+            log_c
+            - np.log(predictive_scale)
+            - ((nu + 1.0) / 2.0) * np.log1p((z * z) / nu)
+        )
         return float(np.sum(terms))
 
     def _updated_state(self, state: _HypothesisState, x: FloatArray) -> _HypothesisState:
         cfg = self.config
         out = state.copy()
-        scale = np.exp(out.log_scale)
-        phi = cfg.phi_max * np.tanh(out.ar_latent)
 
-        if out.previous is None:
-            location = out.mean
-            centered_previous = np.zeros_like(x)
-        else:
-            centered_previous = (out.previous - out.mean) / scale
-            location = out.mean + phi * (out.previous - out.mean)
-
-        z = (x - location) / scale
+        location, innovation_variance, loading, phi = self._components(out)
+        innovation_scale = np.sqrt(
+            np.maximum(innovation_variance, np.finfo(float).tiny)
+        )
+        residual = x - location
+        z = residual / innovation_scale
         nu = cfg.student_df
 
-        # Natural-score-like bounded updates for Student-t location and log scale.
+        # Student-t latent precision weight: large isolated residuals contribute
+        # less information to the regime mean than ordinary observations.
+        robust_weight = np.clip(
+            (nu + 1.0) / (nu + z * z),
+            0.05,
+            1.20,
+        )
+
+        if out.previous is None:
+            transformed = x
+        else:
+            transformed = x - phi * out.previous
+
+        obs_precision = (
+            robust_weight * loading * loading / innovation_variance
+        )
+        new_precision = out.mean_precision + obs_precision
+        information = (
+            out.mean_precision * out.mean
+            + robust_weight * loading * transformed / innovation_variance
+        )
+        out.mean = information / np.maximum(new_precision, np.finfo(float).tiny)
+        out.mean_precision = new_precision
+
+        # GAS updates are reserved for non-mean dynamics, matching the source
+        # model's separation between regime mean and time-varying moments.
         location_score = ((nu + 1.0) * z) / (nu + z * z)
         scale_score = -1.0 + ((nu + 1.0) * z * z) / (nu + z * z)
 
-        # Score contribution of the AR coefficient; centering and Student-t
-        # weighting stop isolated prints from exploding the recursion.
-        ar_score = location_score * centered_previous
+        if out.previous is None:
+            ar_score = np.zeros_like(x)
+        else:
+            centered_previous = (
+                out.previous - state.mean
+            ) / np.maximum(innovation_scale, np.finfo(float).tiny)
+            ar_score = location_score * centered_previous
 
-        out.mean = out.mean + cfg.location_step * scale * location_score
         out.log_scale = np.clip(
             out.log_scale + cfg.scale_step * scale_score,
             cfg.min_log_scale,
@@ -179,16 +241,15 @@ class MultivariateScoreDrivenBOCPD:
         if not np.all(np.isfinite(x)):
             raise ValueError("observation contains NaN or infinity")
 
-        cfg = self.config
+        previous_posterior = np.exp(self._log_posterior)
+        previous_map = int(np.argmax(previous_posterior))
+
         predictive = np.array(
             [self._predictive_logpdf(state, x) for state in self._states],
             dtype=np.float64,
         )
         prior_predictive = self._predictive_logpdf(self._base, x)
 
-        # Classic BOCPD recursion:
-        # r_t=0 uses the fresh-regime prior predictive; growth branches use
-        # the predictive density of their surviving regime hypothesis.
         cp_log_mass = _logsumexp(
             self._log_posterior
             + math.log(self._hazard)
@@ -208,9 +269,7 @@ class MultivariateScoreDrivenBOCPD:
         new_states = [self._updated_state(self._base, x)]
         new_states.extend(self._updated_state(state, x) for state in self._states)
 
-        # Saturating run-length cap: probability mass is preserved instead of
-        # silently throwing away an old, long-lived regime.
-        cap = cfg.max_run_length
+        cap = self.config.max_run_length
         if len(new_states) > cap + 1:
             probabilities = np.exp(new_log_mass)
             merged = probabilities[cap] + probabilities[cap + 1]
@@ -219,7 +278,9 @@ class MultivariateScoreDrivenBOCPD:
             probabilities = probabilities[: cap + 1]
             probabilities[cap] = merged
             probabilities /= probabilities.sum()
-            new_log_mass = np.log(np.maximum(probabilities, np.finfo(float).tiny))
+            new_log_mass = np.log(
+                np.maximum(probabilities, np.finfo(float).tiny)
+            )
             new_states = new_states[: cap + 1]
 
         self._states = new_states
@@ -228,14 +289,42 @@ class MultivariateScoreDrivenBOCPD:
         posterior = np.exp(new_log_mass)
         map_run = int(np.argmax(posterior))
         map_state = self._states[map_run]
-        short_end = min(cfg.short_run_window + 1, len(posterior))
+        short_end = min(self.config.short_run_window + 1, len(posterior))
+        short_probability = float(
+            np.clip(posterior[:short_end].sum(), 0.0, 1.0)
+        )
+
+        if short_probability > 0.0:
+            short_weights = posterior[:short_end] / short_probability
+            short_means = np.stack(
+                [state.mean for state in self._states[:short_end]], axis=0
+            )
+            recent_mean = np.sum(
+                short_weights[:, None] * short_means,
+                axis=0,
+            )
+        else:
+            recent_mean = map_state.mean.copy()
+
+        expected_growth = min(previous_map + 1, cap)
+        if expected_growth > 0 and map_run < expected_growth:
+            run_length_drop = (
+                expected_growth - map_run
+            ) / expected_growth
+        else:
+            run_length_drop = 0.0
 
         return BOCPDUpdate(
             changepoint_probability=float(posterior[0]),
-            short_run_probability=float(np.clip(posterior[:short_end].sum(), 0.0, 1.0)),
+            short_run_probability=short_probability,
             map_run_length=map_run,
+            previous_map_run_length=previous_map,
+            run_length_drop=float(np.clip(run_length_drop, 0.0, 1.0)),
             posterior=posterior.copy(),
             regime_mean=map_state.mean.copy(),
+            recent_regime_mean=recent_mean.copy(),
+            regime_mean_std=np.sqrt(1.0 / map_state.mean_precision),
             regime_scale=np.exp(map_state.log_scale.copy()),
-            ar_coefficient=cfg.phi_max * np.tanh(map_state.ar_latent.copy()),
+            ar_coefficient=self.config.phi_max
+            * np.tanh(map_state.ar_latent.copy()),
         )
