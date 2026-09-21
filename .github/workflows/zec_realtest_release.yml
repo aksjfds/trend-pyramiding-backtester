@@ -6,6 +6,8 @@ on:
       - feature/scoredriven-bocpd
     paths:
       - "experiments/scoredriven_bocpd/examples/real_zec_2025_2026.py"
+      - "experiments/scoredriven_bocpd/src/**"
+      - "experiments/scoredriven_bocpd/tests/**"
       - ".github/workflows/zec_realtest_release.yml"
   workflow_dispatch:
 
