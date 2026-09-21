@@ -91,7 +91,12 @@ class MarketFeatureBuilder:
         if "close" not in frame.columns:
             raise ValueError("input frame must contain 'close'")
 
-        close = frame["close"].astype(float).clip(lower=np.finfo(float).tiny)
+        close = frame["close"].astype(float)
+        close_values = close.to_numpy(dtype=np.float64)
+        if not np.all(np.isfinite(close_values)):
+            raise ValueError("close contains NaN or infinity")
+        if np.any(close_values <= 0.0):
+            raise ValueError("close must be strictly positive")
         log_return = np.log(close).diff()
 
         features: dict[str, pd.Series] = {
