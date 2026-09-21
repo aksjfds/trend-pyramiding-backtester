@@ -37,13 +37,11 @@ jobs:
       - name: Unit tests
         run: pytest
 
-      - name: Fetch earliest available HYPEUSDT 1H history from Bybit
+      - name: Fetch HYPE full-history spot data from CoinW
         run: |
           mkdir -p artifacts/HYPE_FULL
-          python scripts/fetch_bybit_klines.py \
-            --symbol HYPEUSDT \
-            --category linear \
-            --interval 60 \
+          python scripts/fetch_coinw_klines.py \
+            --pair HYPE_USDT \
             --start 2024-11-29T00:00:00Z \
             --output artifacts/HYPE_FULL/HYPE_1h.csv \
             --metadata artifacts/HYPE_FULL/market_metadata.json
