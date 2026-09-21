@@ -201,6 +201,10 @@ def main() -> None:
     )
 
     raw_trigger_hours = 0
+    cp_values: list[float] = []
+    short_values: list[float] = []
+    bearish_values: list[float] = []
+    map_run_values: list[int] = []
     events: list[dict[str, float | int | str | bool]] = []
     previous_triggered = False
     last_event_i = -10_000
@@ -208,6 +212,10 @@ def main() -> None:
 
     for i, (_, row) in enumerate(features.iterrows()):
         signal = detector.update(row.to_dict())
+        cp_values.append(signal.bocpd.changepoint_probability)
+        short_values.append(signal.bocpd.short_run_probability)
+        bearish_values.append(signal.bearish_score)
+        map_run_values.append(signal.bocpd.map_run_length)
         if signal.triggered:
             raw_trigger_hours += 1
 
@@ -246,6 +254,42 @@ def main() -> None:
             return None
         return float(s) / float(b)
 
+    def distribution(values: list[float]) -> dict[str, float]:
+        a = np.asarray(values, dtype=float)
+        return {
+            "q50": float(np.quantile(a, 0.50)),
+            "q90": float(np.quantile(a, 0.90)),
+            "q95": float(np.quantile(a, 0.95)),
+            "q99": float(np.quantile(a, 0.99)),
+            "q999": float(np.quantile(a, 0.999)),
+            "max": float(np.max(a)),
+        }
+
+    diagnostics = {
+        "changepoint_probability": distribution(cp_values),
+        "short_run_probability": distribution(short_values),
+        "bearish_score": distribution(bearish_values),
+        "max_map_run_length": int(max(map_run_values)),
+        "counts": {
+            "cp_ge_005": int(np.sum(np.asarray(cp_values) >= 0.05)),
+            "cp_ge_010": int(np.sum(np.asarray(cp_values) >= 0.10)),
+            "cp_ge_020": int(np.sum(np.asarray(cp_values) >= 0.20)),
+            "short_ge_010": int(np.sum(np.asarray(short_values) >= 0.10)),
+            "short_ge_020": int(np.sum(np.asarray(short_values) >= 0.20)),
+            "short_ge_030": int(np.sum(np.asarray(short_values) >= 0.30)),
+            "short_ge_060": int(np.sum(np.asarray(short_values) >= 0.60)),
+            "bearish_ge_055": int(np.sum(np.asarray(bearish_values) >= 0.55)),
+            "bearish_ge_060": int(np.sum(np.asarray(bearish_values) >= 0.60)),
+            "bearish_ge_065": int(np.sum(np.asarray(bearish_values) >= 0.65)),
+            "joint_short020_bearish060": int(np.sum(
+                (np.asarray(short_values) >= 0.20) & (np.asarray(bearish_values) >= 0.60)
+            )),
+            "joint_short010_bearish060": int(np.sum(
+                (np.asarray(short_values) >= 0.10) & (np.asarray(bearish_values) >= 0.60)
+            )),
+        },
+    }
+
     result = {
         "dataset": {
             "venue": "Binance Spot",
@@ -269,6 +313,7 @@ def main() -> None:
             "features": list(features.columns),
         },
         "raw_trigger_hours": raw_trigger_hours,
+        "diagnostics": diagnostics,
         "signal_summary": event_summary,
         "baseline_summary": baseline_summary,
         "lift_vs_baseline": {
