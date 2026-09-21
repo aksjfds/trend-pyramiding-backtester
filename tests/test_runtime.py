@@ -1,7 +1,6 @@
 import json
 import os
 import signal
-import stat
 import threading
 from pathlib import Path
 
@@ -9,33 +8,13 @@ import pytest
 
 from trend_pyramiding import okx_cli, runtime
 from trend_pyramiding.live import LiveConfig, StateStore
-from trend_pyramiding.okx import Credentials, UncertainWrite
+from trend_pyramiding.okx import UncertainWrite
 
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("PYRAMID_HEARTBEAT_FILE", str(tmp_path / "heartbeat.json"))
     monkeypatch.delenv("PYRAMID_REQUIRE_PERSISTENT_STATE", raising=False)
-    monkeypatch.delenv("OKX_CREDENTIALS_FILE", raising=False)
-
-
-def test_platform_secret_is_copied_privately_then_removed(tmp_path, monkeypatch):
-    mounted = tmp_path / "mounted.toml"
-    mounted.write_text('[live]\napi_key="key"\napi_secret="secret"\npassphrase="pass"\n')
-    mounted.chmod(0o444)
-    monkeypatch.setenv("OKX_CREDENTIALS_FILE", str(mounted))
-    with runtime.credential_config(tmp_path / "unused") as private:
-        assert private != mounted
-        assert stat.S_IMODE(private.stat().st_mode) == 0o600
-        assert Credentials.load(tmp_path / "unused.json", False, private).key == "key"
-    assert not private.exists()
-    assert stat.S_IMODE(mounted.stat().st_mode) == 0o444
-
-
-def test_local_credentials_path_unchanged_without_platform_override(tmp_path):
-    path = tmp_path / "credentials.toml"
-    with runtime.credential_config(path) as selected:
-        assert selected == path
 
 
 def test_sigterm_requests_stop_without_interrupting_work_and_restores_handler():

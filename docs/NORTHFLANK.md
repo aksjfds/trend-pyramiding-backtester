@@ -4,7 +4,7 @@
 
 ## 创建服务
 
-1. 把代码提交到你连接 Northflank 的 Git 仓库。不要提交本地凭据文件；`.gitignore` 与 Docker 构建白名单已排除它。
+1. 把代码提交到你连接 Northflank 的 Git 仓库。API 密钥只在平台运行时环境填写，不要提交到仓库。
 2. 在 Northflank 项目中创建 **Combined service**，选择仓库与分支，使用 **Dockerfile** 构建。Dockerfile 路径为 `/Dockerfile`，构建上下文为 `/`。
 3. 实例数设为 **1**，不启用水平自动扩缩容或多实例。无需添加端口或公开域名。可先分配 1 vCPU / 512 MiB，之后根据实际内存占用调整。
 4. 添加 **Single Read/Write** 持久化卷，挂载至 **`/data`**，容量可从 1 GiB 开始。该模式更新时先终止旧容器，避免两个交易进程同时运行。
@@ -12,31 +12,23 @@
 
 镜像以 UID/GID `10001:10001` 运行。Northflank 会按镜像用户组配置卷权限；若迁移的旧卷仍归其他用户所有，需要先调整卷内目录所有权，不要把服务长期改为 root。程序不会在缺少 `/data` 挂载时启动交易。
 
-## 凭据：继续使用配置文件
+## API 密钥：仅使用环境变量
 
-在 Northflank 服务 **Environment → Secret files** 中添加 **运行时文件**：
+在 Northflank 服务的 **Environment** 页面添加以下 **Runtime variables**，值填写在平台的保密输入区域：
 
-- 挂载路径：`/run/secrets/okx.credentials.toml`
-- 内容：复制你本地 `config/okx.credentials.toml` 的内容，在 Northflank 的保密输入区域填写。
-- 添加运行时变量：`OKX_CREDENTIALS_FILE=/run/secrets/okx.credentials.toml`。
+| 实盘变量名 | 内容 |
+| --- | --- |
+| `OKX_API_KEY` | OKX API Key |
+| `OKX_API_SECRET` | OKX Secret Key |
+| `OKX_API_PASSPHRASE` | 创建 API 时设置的 Passphrase |
 
-```toml
-[live]
-api_key = "填写实盘 API Key"
-api_secret = "填写实盘 Secret"
-passphrase = "填写实盘 Passphrase"
+也可以创建 **Secret Group**，Scope 选择 **Runtime**，限制为仅当前交易服务可用。保存后重启服务，使新变量生效。先保留默认 `pyramid-okx watch`，或运行 `pyramid-okx check` 验证只读连接。
 
-[demo]
-api_key = ""
-api_secret = ""
-passphrase = ""
-```
+模拟盘单独填写 `OKX_DEMO_API_KEY`、`OKX_DEMO_API_SECRET`、`OKX_DEMO_API_PASSPHRASE`，并使用 `--demo`。两套变量互不回退；所选环境的三个值均须非空，否则程序在连接 OKX 前报错，仅提示缺失变量名。
 
-平台挂载文件可能归 root 且只读。程序会在运行时将文件读入权限 600 的临时副本，加载后立即删除副本，原文件不修改。挂载文件需要对应用用户可读；若平台权限不允许读取，可使用下面的运行时 Secret 变量方式。
+程序只读取进程环境变量，不自动加载 `.env`。已有部署升级时，应先填齐运行时变量，移除原有密钥文件挂载及对应路径变量，再重启服务。
 
-不要把凭据设置为 Build arguments 或 Build secret files，不要把它写入 Dockerfile 或 `config/okx.toml`。镜像不包含本机已填写的 API 密钥。
-
-可选方式是在运行时 Secret 变量中填写 `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE`；模拟盘使用 `OKX_DEMO_API_KEY`、`OKX_DEMO_API_SECRET`、`OKX_DEMO_API_PASSPHRASE`。填写了 Secret File 对应环境的配置时，文件优先。
+密钥只配置为运行时变量，不要放入 Build arguments、Dockerfile、策略配置或日志。限制平台密钥查看和容器终端权限，不要打印完整环境变量。镜像不包含 API 密钥。
 
 如果 API Key 绑定了 IP，需要在 OKX 核对 Northflank 实际出口 IP；应用的公开域名并不是出口 IP。部署地区和 API 域名也应与你的 OKX 账户匹配。
 
@@ -115,4 +107,4 @@ docker run --rm trend-pyramiding-okx pyramid-okx scan
 
 这些命令不使用本地 API 凭据，也不启动交易。
 
-官方依据：[创建服务](https://northflank.com/docs/v1/application/getting-started/build-and-deploy-your-code)、[持久化卷](https://northflank.com/docs/v1/application/databases-and-persistence/add-a-volume)、[Secret Files](https://northflank.com/docs/v1/application/secure/upload-secret-files)、[运行时变量](https://northflank.com/docs/v1/application/secure/inject-secrets)。
+官方依据：[创建服务](https://northflank.com/docs/v1/application/getting-started/build-and-deploy-your-code)、[持久化卷](https://northflank.com/docs/v1/application/databases-and-persistence/add-a-volume)、[Secret Groups](https://northflank.com/docs/v1/application/secure/manage-secret-groups)、[运行时变量](https://northflank.com/docs/v1/application/secure/inject-secrets)。

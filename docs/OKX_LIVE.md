@@ -1,6 +1,6 @@
 # OKX 永续合约运行说明
 
-本模块接入 OKX V5 的 USDT 线性永续合约，使用原项目的多头突破、金字塔加仓和结构/ATR 移动止损逻辑。实盘启动命令需要用户在本地执行。
+本模块接入 OKX V5 的 USDT 线性永续合约，使用原项目的多头突破、金字塔加仓和结构/ATR 移动止损逻辑。实盘需明确使用 `run --live` 启动。
 
 ## 当前配置
 
@@ -15,7 +15,7 @@
 
 ## 环境
 
-云端常驻部署请参阅 [Northflank 部署说明](NORTHFLANK.md)，包含持久化状态、Secret File 配置、健康检查和异常暂停恢复。
+云端常驻部署请参阅 [Northflank 部署说明](NORTHFLANK.md)，包含持久化状态、运行时环境变量配置、健康检查和异常暂停恢复。
 
 ```bash
 cd /Users/a/code/trend-pyramiding-backtester
@@ -31,18 +31,16 @@ Python 3.11+。当前本机环境已使用 Python 3.14 建立 `.venv`。
 
 账户应设置为合约模式或跨币种保证金模式，以及单向持仓；关闭自动借币。程序不会切换账户模式。启动 `run` 后才会设置并验证选中币对的 2 倍逐仓杠杆。
 
-直接编辑本地配置文件 `config/okx.credentials.toml`，在 `[live]` 区填写实盘凭据：
+API 密钥仅从运行时环境变量读取：
 
-```toml
-[live]
-api_key = "你的 API Key"
-api_secret = "你的 Secret"
-passphrase = "创建 API 时设置的 Passphrase"
-```
+| 环境 | API Key | Secret Key | Passphrase |
+| --- | --- | --- | --- |
+| 实盘 | `OKX_API_KEY` | `OKX_API_SECRET` | `OKX_API_PASSPHRASE` |
+| 模拟盘 | `OKX_DEMO_API_KEY` | `OKX_DEMO_API_SECRET` | `OKX_DEMO_API_PASSPHRASE` |
 
-本机已创建空白配置文件，权限为 600，并被 Git 忽略。新克隆项目可复制 `config/okx.credentials.example.toml` 为 `config/okx.credentials.toml`，再执行 `chmod 600 config/okx.credentials.toml`。请保留示例文件为空，只在本地凭据文件填写真实值。
+在 Northflank 的 Environment 中设置 Runtime variables，或使用仅授权给当前服务的 Runtime Secret Group，然后重启服务。本地运行时也需事先将所选环境的三个变量注入进程环境；程序不自动加载 `.env`。不要将真实值写入代码、策略配置、构建参数或日志，也不要把密钥发到聊天或提交 Git。
 
-已填写的配置优先于环境变量和旧 JSON 凭据；当前环境的三个字段必须完整。当前环境的配置为空或文件不存在时，仍兼容环境变量 `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE` 和旧文件 `secrets/okx-live.json`。旧的 `pyramid-okx credentials` 命令仍可用于创建该 JSON 文件。不要把密钥发到聊天或提交 Git。
+三个变量必须全部非空，缺失时在连接 OKX 前报错；实盘与模拟盘互不回退。
 
 地区域名在 `config/okx.toml` 中的 `base_url` 设置，须使用账户对应的 OKX 官方 API 域名；不要通过未知代理提交 API 凭据。
 
@@ -55,7 +53,7 @@ pyramid-okx scan
 # 只读认证、余额、账户模式和持仓检查，不设置杠杆、不下单
 pyramid-okx check
 
-# 用户在本地明确启动实盘
+# 明确启动实盘
 pyramid-okx run --live
 
 # 只读本地运行状态
@@ -67,13 +65,13 @@ pyramid-okx status
 独立的 OKX 模拟盘凭据、状态和接口标志：
 
 ```bash
-# 在 config/okx.credentials.toml 的 [demo] 区填写模拟盘凭据后：
+# 设置上述三个 OKX_DEMO_API_* 环境变量后：
 pyramid-okx check --demo
 pyramid-okx run --demo
 pyramid-okx status --demo
 ```
 
-模拟盘读取同一配置文件的 `[demo]` 区，字段同样为 `api_key`、`api_secret`、`passphrase`。该区为空时，兼容 `secrets/okx-demo.json` 或 `OKX_DEMO_API_KEY`、`OKX_DEMO_API_SECRET`、`OKX_DEMO_API_PASSPHRASE`。不能混用实盘和模拟盘密钥。
+模拟盘只读取 `OKX_DEMO_API_*` 环境变量。不能混用实盘和模拟盘密钥。
 
 ## 执行和恢复
 

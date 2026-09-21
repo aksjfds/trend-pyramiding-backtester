@@ -9,23 +9,7 @@ import signal
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
-
-
-@contextmanager
-def credential_config(default: Path):
-    """Copy a platform-managed read-only Secret File into a private temporary file."""
-    mounted = os.environ.get("OKX_CREDENTIALS_FILE")
-    if not mounted:
-        yield default
-        return
-    with tempfile.TemporaryDirectory(prefix="pyramid-secret-") as directory:
-        path = Path(directory) / "credentials.toml"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(Path(mounted).read_bytes())
-        yield path
 
 
 def require_persistent_state(path: Path):

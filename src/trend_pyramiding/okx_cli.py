@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 from dataclasses import replace
@@ -9,27 +8,7 @@ from pathlib import Path
 
 from .live import LiveConfig, StateStore, SwapRunner, account_snapshot
 from .okx import Credentials, OKXClient, OKXError, UncertainWrite, dec, universe
-from .runtime import ProcessControl, credential_config, require_persistent_state
-
-
-def save_credentials(path: Path, demo: bool):
-    if path.exists():
-        raise ValueError(f"credentials already exist at {path}; edit them locally if needed")
-    values = {
-        key: getpass.getpass(label).strip()
-        for key, label in (
-            ("key", "OKX API Key (hidden): "),
-            ("secret", "OKX Secret (hidden): "),
-            ("passphrase", "OKX Passphrase (hidden): "),
-        )
-    }
-    if not all(values.values()):
-        raise ValueError("all credential fields are required")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        json.dump({"demo": demo, **values}, handle)
-    print(f"Credentials saved privately to {path}; values are never printed.")
+from .runtime import ProcessControl, require_persistent_state
 
 
 def check_account(client, config, store):
@@ -133,7 +112,7 @@ def run_worker(client, config, strategy, store, *, once=False):
 def main():
     parser = argparse.ArgumentParser(prog="pyramid-okx", description="OKX long-only swap runner")
     parser.add_argument(
-        "command", choices=["scan", "check", "watch", "credentials", "status", "clear-halt", "run"]
+        "command", choices=["scan", "check", "watch", "status", "clear-halt", "run"]
     )
     parser.add_argument(
         "--config", type=Path, default=Path(os.environ.get("PYRAMID_CONFIG", "config/okx.toml"))
@@ -155,11 +134,7 @@ def main():
             raise ValueError("--live is only valid with the production run command")
         root = args.config.resolve().parent.parent
         environment = "demo" if config.demo else "live"
-        credentials_path = root / "secrets" / f"okx-{environment}.json"
         store = StateStore((args.state_dir or root / "state") / f"okx-{environment}.json")
-        if args.command == "credentials":
-            save_credentials(credentials_path, config.demo)
-            return
         if args.command == "status":
             state = store.load()
             if state is None:
@@ -199,8 +174,7 @@ def main():
             require_persistent_state(store.path.parent)
         credentials = None
         if args.command != "scan":
-            with credential_config(args.config.resolve().parent / "okx.credentials.toml") as path:
-                credentials = Credentials.load(credentials_path, config.demo, path)
+            credentials = Credentials.load(config.demo)
         client = OKXClient(
             base_url=config.base_url,
             demo=config.demo,

@@ -50,7 +50,7 @@ comparison.json 包含：
 
 ## 安装
 
-Northflank 容器部署参见 [部署说明](docs/NORTHFLANK.md)。仓库根目录的 Dockerfile 默认运行常驻只读检查；交易状态存入持久化卷，API 密钥通过运行时 Secret File 或 Secret 变量注入。
+Northflank 容器部署参见 [部署说明](docs/NORTHFLANK.md)。仓库根目录的 Dockerfile 默认运行常驻只读检查；交易状态存入持久化卷，API 密钥仅通过运行时 Secret 环境变量注入。
 
 OKX 实盘功能已提供独立命令 `pyramid-okx`，默认配置为 1H、2 倍逐仓 USDT 永续合约，总保证金及费用预留不超过本金的 20%。详见 [OKX 配置与运行说明](docs/OKX_LIVE.md)。账户只读检查与实盘启动分开，实盘需要用户明确执行 `pyramid-okx run --live`。
 

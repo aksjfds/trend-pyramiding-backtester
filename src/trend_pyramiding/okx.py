@@ -7,16 +7,13 @@ import hashlib
 import hmac
 import json
 import os
-import stat
 import time
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
-from pathlib import Path
 
 HOSTS = {
     "https://openapi.okx.com",
@@ -65,51 +62,14 @@ class Credentials:
     passphrase: str
 
     @classmethod
-    def load(cls, path: Path, demo: bool, config_path: Path | None = None) -> Credentials:
-        if config_path is not None and config_path.exists():
-            if config_path.is_symlink() or (
-                os.name != "nt" and stat.S_IMODE(config_path.stat().st_mode) & 0o077
-            ):
-                raise ValueError("credentials config must be private (chmod 600), not a symlink")
-            try:
-                raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            except (tomllib.TOMLDecodeError, UnicodeError):
-                # TOML diagnostics may contain source text, including credential values.
-                raise ValueError(
-                    "invalid credentials TOML; check quoting and section syntax"
-                ) from None
-            section = raw.get("demo" if demo else "live", {})
-            if not isinstance(section, dict) or set(section) - {
-                "api_key",
-                "api_secret",
-                "passphrase",
-            }:
-                raise ValueError("invalid credentials section; use api_key, api_secret, passphrase")
-            values = [section.get(key, "") for key in ("api_key", "api_secret", "passphrase")]
-            if not all(isinstance(value, str) for value in values):
-                raise ValueError("credential values must be quoted strings")
-            if any(values):
-                if not all(value.strip() for value in values):
-                    raise ValueError("credentials config is incomplete; fill all three fields")
-                return cls(*values)
+    def load(cls, demo: bool) -> Credentials:
+        """Read only the selected account's runtime environment variables."""
         prefix = "OKX_DEMO_" if demo else "OKX_"
-        values = [
-            os.environ.get(prefix + key) for key in ("API_KEY", "API_SECRET", "API_PASSPHRASE")
-        ]
-        if any(values):
-            if not all(values):
-                raise ValueError(f"set all three {prefix}API_* environment variables")
-            return cls(*values)
-        if not path.exists():
-            raise ValueError("credentials missing; fill config/okx.credentials.toml locally")
-        if path.is_symlink() or (os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & 0o077):
-            raise ValueError("credentials file must be private (chmod 600), not a symlink")
-        raw = json.loads(path.read_text())
-        if raw.get("demo") is not demo:
-            raise ValueError("credentials environment does not match demo/live")
-        values = [raw.get(k, "") for k in ("key", "secret", "passphrase")]
-        if not all(isinstance(v, str) and v.strip() for v in values):
-            raise ValueError("credentials file is incomplete")
+        names = [prefix + key for key in ("API_KEY", "API_SECRET", "API_PASSPHRASE")]
+        values = [os.environ.get(name, "") for name in names]
+        missing = [name for name, value in zip(names, values) if not value.strip()]
+        if missing:
+            raise ValueError("missing OKX environment variables: " + ", ".join(missing))
         return cls(*values)
 
 

@@ -11,9 +11,9 @@ from trend_pyramiding import okx_cli
 @pytest.fixture
 def config(tmp_path):
     source = Path(__file__).resolve().parents[1] / "config"
-    shutil.copytree(
-        source, tmp_path / "config", ignore=shutil.ignore_patterns("okx.credentials.toml")
-    )
+    (tmp_path / "config").mkdir()
+    for name in ("okx.toml", "default.toml"):
+        shutil.copy2(source / name, tmp_path / "config" / name)
     return tmp_path / "config/okx.toml"
 
 
@@ -82,3 +82,59 @@ def test_env_configuration_and_persistent_state_directory(config, tmp_path, monk
     monkeypatch.setattr(sys, "argv", ["pyramid-okx", "status"])
     okx_cli.main()
     assert json.loads(capsys.readouterr().out)["capital_ceiling"] == 200
+
+
+@pytest.mark.parametrize("demo", [False, True])
+def test_check_uses_environment_credentials(config, monkeypatch, capsys, demo):
+    from trend_pyramiding.okx import Credentials
+
+    for prefix in ("OKX_", "OKX_DEMO_"):
+        for suffix in ("API_KEY", "API_SECRET", "API_PASSPHRASE"):
+            monkeypatch.setenv(prefix + suffix, prefix + suffix)
+    prefix = "OKX_DEMO_" if demo else "OKX_"
+
+    class ReadOnly:
+        def __init__(self, **kwargs):
+            assert kwargs["credentials"] == Credentials(
+                prefix + "API_KEY", prefix + "API_SECRET", prefix + "API_PASSPHRASE"
+            )
+            assert kwargs["demo"] is demo
+            assert kwargs["write_enabled"] is False
+
+        def sync_time(self):
+            pass
+
+    monkeypatch.setattr(
+        sys, "argv", ["pyramid-okx", "check", "--config", str(config), *(["--demo"] if demo else [])]
+    )
+    monkeypatch.setattr(okx_cli, "OKXClient", ReadOnly)
+    monkeypatch.setattr(okx_cli, "check_account", lambda *args: {"authenticated": True})
+    okx_cli.main()
+    assert json.loads(capsys.readouterr().out)["authenticated"] is True
+
+
+def test_missing_environment_never_reads_old_files_or_connects(config, monkeypatch, capsys):
+    for suffix in ("API_KEY", "API_SECRET", "API_PASSPHRASE"):
+        monkeypatch.delenv("OKX_" + suffix, raising=False)
+    # Even a stale deployment with all old credential sources must require runtime variables.
+    old = config.parent / "okx.credentials.toml"
+    old.write_text('[live]\napi_key="old"\napi_secret="old"\npassphrase="old"\n')
+    old.chmod(0o600)
+    legacy = config.parent.parent / "secrets/okx-live.json"
+    legacy.parent.mkdir()
+    legacy.write_text(json.dumps({"demo": False, "key": "old", "secret": "old", "passphrase": "old"}))
+    legacy.chmod(0o600)
+    monkeypatch.setenv("OKX_CREDENTIALS_FILE", str(old))
+    monkeypatch.setattr(sys, "argv", ["pyramid-okx", "check", "--config", str(config)])
+    monkeypatch.setattr(okx_cli, "OKXClient", lambda **kwargs: pytest.fail("must not connect"))
+    with pytest.raises(SystemExit) as exc:
+        okx_cli.main()
+    assert exc.value.code == 1
+    assert "OKX_API_KEY" in capsys.readouterr().err
+
+
+def test_removed_credentials_command_is_rejected(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["pyramid-okx", "credentials"])
+    with pytest.raises(SystemExit) as exc:
+        okx_cli.main()
+    assert exc.value.code == 2

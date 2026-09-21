@@ -1,6 +1,6 @@
 # Production configuration. Reading/checking never enables orders.
 # Real orders require the user to run: pyramid-okx run --live
-# Fill API credentials in the adjacent, Git-ignored okx.credentials.toml file.
+# Supply API credentials only through runtime OKX_API_* environment variables.
 base_url = "https://openapi.okx.com"
 demo = false
 bar = "1H"

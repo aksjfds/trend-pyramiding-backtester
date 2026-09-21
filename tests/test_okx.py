@@ -117,22 +117,6 @@ def test_untrusted_endpoint_cannot_receive_credentials():
         OKXClient(base_url="https://okx.com.evil.invalid")
 
 
-def test_credentials_private_permissions_and_demo_separation(tmp_path, monkeypatch):
-    for suffix in ("API_KEY", "API_SECRET", "API_PASSPHRASE"):
-        monkeypatch.delenv("OKX_" + suffix, raising=False)
-        monkeypatch.delenv("OKX_DEMO_" + suffix, raising=False)
-    path = tmp_path / "secret.json"
-    path.write_text(json.dumps({"demo": False, "key": "a", "secret": "b", "passphrase": "c"}))
-    path.chmod(0o644)
-    with pytest.raises(ValueError, match="private"):
-        Credentials.load(path, False)
-    path.chmod(0o600)
-    assert Credentials.load(path, False).key == "a"
-    with pytest.raises(ValueError, match="environment"):
-        Credentials.load(path, True)
-    assert "passphrase" not in repr(Credentials.load(path, False))
-
-
 def instrument_row(name="BTC", **changes):
     return {
         "instId": f"{name}-USDT-SWAP",
