@@ -174,6 +174,29 @@ def forward_metrics(data: pd.DataFrame, i: int) -> dict[str, float]:
     }
 
 
+def backward_metrics(data: pd.DataFrame, i: int) -> dict[str, float | None]:
+    close0 = float(data.at[i, "close"])
+
+    def back(hours: int) -> float | None:
+        if i < hours:
+            return None
+        return float(close0 / float(data.at[i - hours, "close"]) - 1.0)
+
+    prior_24h_before_recent_6h = None
+    if i >= 30:
+        prior_24h_before_recent_6h = float(
+            float(data.at[i - 6, "close"]) / float(data.at[i - 30, "close"]) - 1.0
+        )
+
+    return {
+        "back_ret_3h": back(3),
+        "back_ret_6h": back(6),
+        "back_ret_12h": back(12),
+        "back_ret_24h": back(24),
+        "prior_24h_before_recent_6h": prior_24h_before_recent_6h,
+    }
+
+
 def summarize(events: list[dict[str, float]]) -> dict[str, float | int | None]:
     if not events:
         return {
@@ -297,6 +320,7 @@ def run_period(label: str, start: str, end: str) -> dict:
                 "bearish_score": signal.bearish_score,
                 "map_run_length": signal.bocpd.map_run_length,
             }
+            item.update(backward_metrics(data, i))
             item.update(forward_metrics(data, i))
             events.append(item)
             last_event_i = i
@@ -309,6 +333,37 @@ def run_period(label: str, start: str, end: str) -> dict:
 
     signal_summary = summarize(events)
     baseline_summary = summarize(baseline)
+
+    def filtered_summary(predicate) -> dict[str, float | int | None]:
+        return summarize([event for event in events if predicate(event)])
+
+    causal_filter_summaries = {
+        "back_6h_negative": filtered_summary(
+            lambda e: e.get("back_ret_6h") is not None and e["back_ret_6h"] < 0.0
+        ),
+        "back_12h_negative": filtered_summary(
+            lambda e: e.get("back_ret_12h") is not None and e["back_ret_12h"] < 0.0
+        ),
+        "back_6h_and_24h_negative": filtered_summary(
+            lambda e: (
+                e.get("back_ret_6h") is not None
+                and e.get("back_ret_24h") is not None
+                and e["back_ret_6h"] < 0.0
+                and e["back_ret_24h"] < 0.0
+            )
+        ),
+        "reversal_recent6_down_prior24_up": filtered_summary(
+            lambda e: (
+                e.get("back_ret_6h") is not None
+                and e.get("prior_24h_before_recent_6h") is not None
+                and e["back_ret_6h"] < 0.0
+                and e["prior_24h_before_recent_6h"] >= 0.0
+            )
+        ),
+        "back_6h_le_minus_1pct": filtered_summary(
+            lambda e: e.get("back_ret_6h") is not None and e["back_ret_6h"] <= -0.01
+        ),
+    }
 
     def distribution(values: list[float]) -> dict[str, float]:
         a = np.asarray(values, dtype=float)
@@ -362,6 +417,7 @@ def run_period(label: str, start: str, end: str) -> dict:
         },
         "raw_trigger_hours": raw_trigger_hours,
         "diagnostics": diagnostics,
+        "causal_filter_summaries": causal_filter_summaries,
         "signal_summary": signal_summary,
         "baseline_summary": baseline_summary,
         "lift_vs_baseline": {
