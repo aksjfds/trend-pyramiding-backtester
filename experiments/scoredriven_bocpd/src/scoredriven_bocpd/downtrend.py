@@ -25,8 +25,9 @@ DEFAULT_DIRECTION_WEIGHTS = {
 
 @dataclass(frozen=True)
 class DowntrendConfig:
-    changepoint_threshold: float = 0.20
     short_run_threshold: float = 0.60
+    max_recent_run_length: int = 5
+    min_previous_run_length: int = 12
     bearish_threshold: float = 0.65
     direction_gain: float = 2.5
     scaler_alpha: float = 0.025
@@ -34,14 +35,14 @@ class DowntrendConfig:
     min_observations: int = 20
 
     def __post_init__(self) -> None:
-        for name in (
-            "changepoint_threshold",
-            "short_run_threshold",
-            "bearish_threshold",
-        ):
+        for name in ("short_run_threshold", "bearish_threshold"):
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
+        if self.max_recent_run_length < 0:
+            raise ValueError("max_recent_run_length must be >= 0")
+        if self.min_previous_run_length < 1:
+            raise ValueError("min_previous_run_length must be >= 1")
         if self.direction_gain <= 0.0:
             raise ValueError("direction_gain must be > 0")
         if self.min_observations < 1:
@@ -59,13 +60,7 @@ class DowntrendSignal:
 
 
 class DowntrendDetector:
-    """BOCPD regime-shift detector plus a post-change direction classifier.
-
-    The BOCPD layer answers "did the data-generating regime change?".
-    Direction is deliberately separated and computed from directional
-    microstructure features so that volatility/spread shocks are not
-    automatically mislabeled as bearish.
-    """
+    """BOCPD regime reset plus a post-change bearish direction classifier."""
 
     def __init__(
         self,
@@ -131,22 +126,35 @@ class DowntrendDetector:
         update = self._detector.update(standardized)
         self._count += 1
 
-        # Direction is a weighted average of the inferred regime location and
-        # the newest observation. The new observation gives early response;
-        # the regime estimate prevents one isolated print from dominating.
-        regime_direction = float(np.dot(self._weights, update.regime_mean)) / self._weight_norm
-        instant_direction = float(np.dot(self._weights, standardized)) / self._weight_norm
-        direction = 0.70 * regime_direction + 0.30 * instant_direction
-        bearish_score = 1.0 / (1.0 + math.exp(self.config.direction_gain * direction))
+        recent_direction = (
+            float(np.dot(self._weights, update.recent_regime_mean))
+            / self._weight_norm
+        )
+        instant_direction = (
+            float(np.dot(self._weights, standardized))
+            / self._weight_norm
+        )
+        direction = 0.80 * recent_direction + 0.20 * instant_direction
+        bearish_score = 1.0 / (
+            1.0 + math.exp(self.config.direction_gain * direction)
+        )
 
+        # The source methodology identifies regimes from the most likely
+        # run-length path. Require an actual reset from a mature regime into a
+        # recent regime, supported by posterior mass on recent run lengths.
+        map_reset = (
+            update.previous_map_run_length >= self.config.min_previous_run_length
+            and update.map_run_length <= self.config.max_recent_run_length
+        )
         change_detected = (
             self._count >= self.config.min_observations
-            and (
-                update.changepoint_probability >= self.config.changepoint_threshold
-                or update.short_run_probability >= self.config.short_run_threshold
-            )
+            and map_reset
+            and update.short_run_probability >= self.config.short_run_threshold
         )
-        triggered = change_detected and bearish_score >= self.config.bearish_threshold
+        triggered = (
+            change_detected
+            and bearish_score >= self.config.bearish_threshold
+        )
 
         return DowntrendSignal(
             observation_count=self._count,
