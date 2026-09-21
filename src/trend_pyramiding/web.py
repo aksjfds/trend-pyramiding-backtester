@@ -262,7 +262,6 @@ class Controller:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                start_new_session=True,
             )
             self.process = process
             self.mode = mode
@@ -275,6 +274,7 @@ class Controller:
         try:
             for line in process.stdout:
                 entry = {"time": time.time(), "text": self.redact(line.rstrip())[:4000]}
+                print(entry["text"], flush=True)
                 with self.lock:
                     if self.process is process:
                         self.logs.append(entry)
@@ -607,11 +607,11 @@ def main():
     try:
         load_local_credentials(args.config)
         state_dir = args.state_dir or args.config.resolve().parent.parent / "state"
-        if args.open and existing_panel(args.port, args.config, state_dir):
+        if existing_panel(args.port, args.config, state_dir):
             origin = f"http://127.0.0.1:{args.port}"
-            print(f"网页服务已在运行：{origin}，已打开现有页面。", flush=True)
-            webbrowser.open(origin)
-            return
+            raise ValueError(
+                f"已有网页服务正在运行：{origin}。请先停止旧进程，再在当前终端重新启动。"
+            )
         controller = Controller(args.config, state_dir)
         with StateStore(state_dir / "web-controller.json").lock():
             with PanelServer(args.port, controller) as server:
