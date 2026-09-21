@@ -1,0 +1,115 @@
+name: HYPE Full-History Backtest
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Run HYPE full-history backtest'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest
+
+      - name: Fetch earliest available HYPEUSDT 1H history from Bybit
+        run: |
+          mkdir -p artifacts/HYPE_FULL
+          python scripts/fetch_bybit_klines.py \
+            --symbol HYPEUSDT \
+            --category linear \
+            --interval 60 \
+            --start 2024-11-29T00:00:00Z \
+            --output artifacts/HYPE_FULL/HYPE_1h.csv \
+            --metadata artifacts/HYPE_FULL/market_metadata.json
+
+      - name: Backtest HYPE full history
+        run: |
+          pyramid-backtest backtest \
+            --csv artifacts/HYPE_FULL/HYPE_1h.csv \
+            --config config/default.toml \
+            --output-dir artifacts/HYPE_FULL
+
+      - name: Build release notes
+        run: |
+          python scripts/build_release_notes.py \
+            --artifacts-dir artifacts/HYPE_FULL \
+            --output artifacts/HYPE_FULL/release_notes.md
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("artifacts/HYPE_FULL")
+          meta = json.loads((root / "market_metadata.json").read_text(encoding="utf-8"))
+          notes = (root / "release_notes.md").read_text(encoding="utf-8")
+          prefix = (
+              "# HYPE Full-History 1H Backtest\n\n"
+              "**Coverage:** earliest continuous HYPEUSDT perpetual 1H history "
+              "available from Bybut through the latest fully closed candle.\n\n"
+              f"- Actual first candle: `{meta['first_candle_open']}`\n"
+              f"- Actual last candle: `{meta['last_candle_close']}`\n"
+              f"- Bars: `{meta['bars']}`\n"
+              "- HYPE token genesis was 2024-11-29; Bybit HYPEUSDT perpetual "
+              "pre-market began 2024-12-05 12:00 UTC, so the first six days "
+              "of token history are not represented in this 1H perpetual dataset.\n\n"
+          )
+          (root / "release_notes.md").write_text(prefix + notes, encoding="utf-8")
+          PY
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAG="hype-full-v0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+
+          git tag "${TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${TAG}"
+
+          gh release create "${TAG}" \
+            artifacts/HYPE_FULL/summary.json \
+            artifacts/HYPE_FULL/benchmark_summary.json \
+            artifacts/HYPE_FULL/comparison.json \
+            artifacts/HYPE_FULL/equity_curve.csv \
+            artifacts/HYPE_FULL/benchmark_equity_curve.csv \
+            artifacts/HYPE_FULL/trades.csv \
+            artifacts/HYPE_FULL/events.csv \
+            artifacts/HYPE_FULL/market_metadata.json \
+            artifacts/HYPE_FULL/HYPE_1h.csv \
+            --verify-tag \
+            --title "HYPE Full-History Backtest · ${SHORT_SHA}" \
+            --notes-file artifacts/HYPE_FULL/release_notes.md \
+            --latest
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hype-full-history-${{ github.sha }}
+          path: artifacts/HYPE_FULL/
+          retention-days: 30
