@@ -5,3 +5,5 @@
 .parameter-settings{margin-bottom:24px}.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:18px;margin:20px 0}.settings-grid label{display:block;margin:0}.settings-grid input,.settings-grid select{width:100%;margin-top:8px;padding:11px;border:1px solid #d7dedb;border-radius:8px;background:#fff;font:inherit;box-sizing:border-box}.settings-grid input[type=checkbox]{width:auto;display:block}.parameter-settings summary{cursor:pointer;font-weight:600;padding:12px 0}.settings-grid input:disabled,.settings-grid select:disabled{opacity:.6}.metric .text-button{font-size:12px;margin-left:8px}
 
 .network-status{font-weight:600}.network-status.ok{color:#087f6d}.network-status.bad{color:#a94437}.network-status.checking{color:#75838b}
+
+.network-row{display:flex;align-items:center;justify-content:flex-end;gap:10px}.network-row .text-button{flex:none}.network-status{font-weight:600}.network-status.ok{color:#087f6d}.network-status.bad{color:#a94437}.network-status.checking{color:#75838b}
