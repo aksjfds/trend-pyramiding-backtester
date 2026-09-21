@@ -18,6 +18,7 @@ class EWMStandardizer:
     alpha: float = 0.025
     clip: float = 8.0
     epsilon: float = 1e-8
+    center: bool = True
 
     def __post_init__(self) -> None:
         if self.dimension < 1:
@@ -45,7 +46,11 @@ class EWMStandardizer:
             return np.zeros_like(x)
 
         std = np.sqrt(np.maximum(self._variance, self.epsilon))
-        z = np.clip((x - self._mean) / std, -self.clip, self.clip)
+        if self.center:
+            normalized = (x - self._mean) / std
+        else:
+            normalized = x / std
+        z = np.clip(normalized, -self.clip, self.clip)
 
         delta = x - self._mean
         self._mean = self._mean + self.alpha * delta
