@@ -94,6 +94,7 @@ class DowntrendDetector:
             len(self.feature_names),
             alpha=self.config.scaler_alpha,
             clip=self.config.scaler_clip,
+            center=False,
         )
         self._detector = MultivariateScoreDrivenBOCPD(
             len(self.feature_names),
