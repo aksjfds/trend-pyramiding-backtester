@@ -21,6 +21,8 @@ dev = [
 
 [project.scripts]
 pyramid-backtest = "trend_pyramiding.cli:main"
+pyramid-okx = "trend_pyramiding.okx_cli:main"
+pyramid-health = "trend_pyramiding.runtime:health_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

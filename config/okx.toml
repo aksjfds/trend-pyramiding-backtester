@@ -1,0 +1,17 @@
+# Production configuration. Reading/checking never enables orders.
+# Real orders require the user to run: pyramid-okx run --live
+# Fill API credentials in the adjacent, Git-ignored okx.credentials.toml file.
+base_url = "https://openapi.okx.com"
+demo = false
+bar = "1H"
+leverage = 2
+capital_fraction = 0.20
+top_n = 5
+# Empty: choose the five highest-turnover live USDT linear swaps on first start.
+# The selected universe is persisted and never rotated while managing positions.
+instruments = []
+poll_seconds = 10
+max_signal_age_seconds = 120
+max_entry_slippage_bps = 10.0
+max_spread_bps = 20.0
+strategy_config = "default.toml"

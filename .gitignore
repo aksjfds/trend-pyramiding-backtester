@@ -8,3 +8,8 @@ build/
 dist/
 artifacts/
 data/*.csv
+secrets/
+state/
+.env
+.env.*
+config/okx.credentials.toml
