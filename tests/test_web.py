@@ -375,13 +375,13 @@ def test_parameters_cannot_change_while_worker_or_external_process_runs(controll
     assert not controller.store(False).path.with_suffix(".settings.json").exists()
 
 
-def test_okx_connectivity_uses_public_time_and_caches(controller, monkeypatch):
+def test_okx_connectivity_uses_public_time(controller, monkeypatch):
     calls = []
 
     class FakeClient:
         def __init__(self, **kwargs):
             assert kwargs["base_url"] == controller.config.base_url
-            assert kwargs["timeout"] == 3
+            assert kwargs["timeout"] == 2
 
         def get(self, path, *, private=True):
             assert path == "/api/v5/public/time"
@@ -390,15 +390,29 @@ def test_okx_connectivity_uses_public_time_and_caches(controller, monkeypatch):
             return [{"ts": str(int(time.time() * 1000))}]
 
     monkeypatch.setattr(web, "OKXClient", FakeClient)
-    first = controller.okx_connectivity()
-    second = controller.okx_connectivity()
+    result = controller.okx_connectivity()
 
-    assert first["connected"] is True
-    assert first["latency_ms"] >= 0
-    assert first["endpoint"] == controller.config.base_url
-    assert first["error"] is None
-    assert second == first
+    assert result["connected"] is True
+    assert result["latency_ms"] >= 0
+    assert result["endpoint"] == controller.config.base_url
+    assert result["error"] is None
     assert calls == ["/api/v5/public/time"]
+
+
+def test_okx_connectivity_converts_unexpected_errors_to_status(controller, monkeypatch):
+    class BrokenClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, *args, **kwargs):
+            raise Exception("network exploded")
+
+    monkeypatch.setattr(web, "OKXClient", BrokenClient)
+    result = controller.okx_connectivity()
+
+    assert result["connected"] is False
+    assert result["latency_ms"] is None
+    assert result["error"] == "network exploded"
 
 
 def test_connectivity_http_endpoint(server, monkeypatch):
