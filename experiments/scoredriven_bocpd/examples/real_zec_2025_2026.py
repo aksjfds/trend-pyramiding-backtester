@@ -234,12 +234,53 @@ def run_period(label: str, start: str, end: str) -> dict:
 
     events: list[dict[str, float | int | str]] = []
     raw_trigger_hours = 0
+    short_values: list[float] = []
+    bearish_values: list[float] = []
+    previous_direction_values: list[float] = []
+    recent_direction_values: list[float] = []
+    direction_shift_values: list[float] = []
+    gate_counts = {
+        "map_reset": 0,
+        "directional_reversal": 0,
+        "short_run_ge_threshold": 0,
+        "bearish_ge_threshold": 0,
+        "map_reset_and_short": 0,
+        "map_reset_short_recent_negative": 0,
+        "map_reset_short_direction_drop": 0,
+        "change_detected": 0,
+        "triggered": 0,
+    }
     previous_triggered = False
     last_event_i = -10000
     cooldown_hours = 24
 
     for i, (_, row) in enumerate(features.iterrows()):
         signal = detector.update(row.to_dict())
+        short_values.append(signal.bocpd.short_run_probability)
+        bearish_values.append(signal.bearish_score)
+        previous_direction_values.append(signal.previous_direction)
+        recent_direction_values.append(signal.recent_direction)
+        direction_shift_values.append(signal.direction_shift)
+
+        short_ok = signal.bocpd.short_run_probability >= downtrend_config.short_run_threshold
+        bearish_ok = signal.bearish_score >= downtrend_config.bearish_threshold
+        recent_negative = signal.recent_direction < 0.0
+        direction_drop = signal.direction_shift > 0.0
+
+        gate_counts["map_reset"] += int(signal.map_reset)
+        gate_counts["directional_reversal"] += int(signal.directional_reversal)
+        gate_counts["short_run_ge_threshold"] += int(short_ok)
+        gate_counts["bearish_ge_threshold"] += int(bearish_ok)
+        gate_counts["map_reset_and_short"] += int(signal.map_reset and short_ok)
+        gate_counts["map_reset_short_recent_negative"] += int(
+            signal.map_reset and short_ok and recent_negative
+        )
+        gate_counts["map_reset_short_direction_drop"] += int(
+            signal.map_reset and short_ok and recent_negative and direction_drop
+        )
+        gate_counts["change_detected"] += int(signal.change_detected)
+        gate_counts["triggered"] += int(signal.triggered)
+
         if signal.triggered:
             raw_trigger_hours += 1
 
@@ -268,6 +309,27 @@ def run_period(label: str, start: str, end: str) -> dict:
 
     signal_summary = summarize(events)
     baseline_summary = summarize(baseline)
+
+    def distribution(values: list[float]) -> dict[str, float]:
+        a = np.asarray(values, dtype=float)
+        return {
+            "min": float(np.min(a)),
+            "q01": float(np.quantile(a, 0.01)),
+            "q10": float(np.quantile(a, 0.10)),
+            "q50": float(np.quantile(a, 0.50)),
+            "q90": float(np.quantile(a, 0.90)),
+            "q99": float(np.quantile(a, 0.99)),
+            "max": float(np.max(a)),
+        }
+
+    diagnostics = {
+        "gate_counts": gate_counts,
+        "short_run_probability": distribution(short_values),
+        "bearish_score": distribution(bearish_values),
+        "previous_direction": distribution(previous_direction_values),
+        "recent_direction": distribution(recent_direction_values),
+        "direction_shift_previous_minus_recent": distribution(direction_shift_values),
+    }
 
     def lift(metric: str) -> float | None:
         s = signal_summary.get(metric)
@@ -299,6 +361,7 @@ def run_period(label: str, start: str, end: str) -> dict:
             "features": list(features.columns),
         },
         "raw_trigger_hours": raw_trigger_hours,
+        "diagnostics": diagnostics,
         "signal_summary": signal_summary,
         "baseline_summary": baseline_summary,
         "lift_vs_baseline": {
