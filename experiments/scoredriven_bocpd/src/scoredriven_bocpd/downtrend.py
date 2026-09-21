@@ -56,6 +56,11 @@ class DowntrendSignal:
     change_detected: bool
     bearish_score: float
     triggered: bool
+    recent_direction: float
+    previous_direction: float
+    direction_shift: float
+    map_reset: bool
+    directional_reversal: bool
     standardized_features: FloatArray
     bocpd: BOCPDUpdate
 
@@ -172,6 +177,11 @@ class DowntrendDetector:
             change_detected=change_detected,
             bearish_score=bearish_score,
             triggered=triggered,
+            recent_direction=recent_direction,
+            previous_direction=previous_direction,
+            direction_shift=previous_direction - recent_direction,
+            map_reset=map_reset,
+            directional_reversal=directional_reversal,
             standardized_features=standardized.copy(),
             bocpd=update,
         )
