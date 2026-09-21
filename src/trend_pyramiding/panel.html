@@ -24,7 +24,7 @@
 <div class="actions"><button class="primary" id="start">▶ 启动观察</button><button class="secondary" id="stop" disabled>■ 停止</button></div>
 <div class="stop-note">停止后保留已有仓位和交易所止损，移动止损暂停。</div></section>
 <section class="card runtime"><div class="section-heading"><h2>运行详情</h2><button class="text-button" id="check">刷新账户 ↗</button></div>
-<dl><div><dt>API 密钥</dt><dd id="keys">正在读取…</dd></div><div><dt>OKX 网络连接</dt><dd id="okx-network" class="network-status checking">正在检测…</dd></div><div><dt>网络检测时间</dt><dd id="okx-network-time">—</dd></div><div><dt>本次启动</dt><dd id="started">尚未启动</dd></div><div><dt>最近活动</dt><dd id="heartbeat">—</dd></div><div><dt>交易账户可用 USDT</dt><dd id="available">—</dd></div><div><dt>账户持仓 / 待处理订单</dt><dd id="account-orders">—</dd></div></dl><p class="hint" id="key-note">密钥由服务读取，不在网页中显示。</p></section>
+<dl><div><dt>API 密钥</dt><dd id="keys">正在读取…</dd></div><div><dt>OKX 网络连接</dt><dd class="network-row"><span id="okx-network" class="network-status checking">正在检测…</span><button type="button" class="text-button" id="refresh-network">刷新</button></dd></div><div><dt>网络检测时间</dt><dd id="okx-network-time">—</dd></div><div><dt>本次启动</dt><dd id="started">尚未启动</dd></div><div><dt>最近活动</dt><dd id="heartbeat">—</dd></div><div><dt>交易账户可用 USDT</dt><dd id="available">—</dd></div><div><dt>账户持仓 / 待处理订单</dt><dd id="account-orders">—</dd></div></dl><p class="hint" id="key-note">密钥由服务读取，不在网页中显示。</p></section>
 </div>
 <section class="card parameter-settings" id="settings" aria-label="资金与策略设置">
 <div class="section-heading"><div><h2>资金与策略设置</h2><p class="hint">停止策略且无持仓、待核对订单时可修改。保存后下次启动生效，重启服务后保留。</p></div><span class="tag" id="settings-saved">正在读取…</span></div>

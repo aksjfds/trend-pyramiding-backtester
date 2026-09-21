@@ -111,19 +111,23 @@ async function refreshNetwork() {
   if (networkLoading) return;
   networkLoading = true;
   const node = $('okx-network');
-  if (!node.textContent || node.textContent === '正在检测…') {
-    node.textContent = '正在检测…';
-    node.className = 'network-status checking';
-  }
+  const button = $('refresh-network');
+  node.textContent = '正在检测…';
+  node.className = 'network-status checking';
+  node.title = '';
+  button.disabled = true;
+  button.textContent = '检测中…';
   try {
     renderNetwork(await api('/api/connectivity'));
   } catch (error) {
-    node.textContent = '检测失败';
+    node.textContent = '网页连接异常';
     node.className = 'network-status bad';
     node.title = error.message;
     $('okx-network-time').textContent = date(Date.now() / 1000);
   } finally {
     networkLoading = false;
+    button.disabled = false;
+    button.textContent = '刷新';
   }
 }
 
@@ -194,6 +198,7 @@ async function loadMarkets() {
   finally {catalogLoading=false;}
 }
 $('check').addEventListener('click',()=>{message('');checkAccount();});
+$('refresh-network').addEventListener('click',()=>refreshNetwork());
 $('mode').addEventListener('change',()=>{message('');selectionDirty=false;settingsDirty=false;marketCatalog=[];catalogProfile=null;selectionProfile=null;controls();refresh();});
 $('selection-mode').addEventListener('change',()=>{selectionDirty=true;$('selection-feedback').textContent='';syncSelection(last);controls();});
 $('market-search').addEventListener('input',()=>{renderMarkets();controls();});
@@ -206,7 +211,7 @@ $('save-selection').addEventListener('click',async()=>{
   } catch(error){message(error.message);}
   finally {selectionSaving=false;await refresh();controls();}
 });
-controls(); refresh(); refreshNetwork(); setInterval(refresh,2000); setInterval(refreshNetwork,300000);
+controls(); refresh(); refreshNetwork(); setInterval(refresh,2000);
 
 function syncSettings(s) {
   if (!s.parameters) return;
