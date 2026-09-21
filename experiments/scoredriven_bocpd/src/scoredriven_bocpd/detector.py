@@ -232,7 +232,7 @@ class MultivariateScoreDrivenBOCPD:
 
         return BOCPDUpdate(
             changepoint_probability=float(posterior[0]),
-            short_run_probability=float(posterior[:short_end].sum()),
+            short_run_probability=float(np.clip(posterior[:short_end].sum(), 0.0, 1.0)),
             map_run_length=map_run,
             posterior=posterior.copy(),
             regime_mean=map_state.mean.copy(),
