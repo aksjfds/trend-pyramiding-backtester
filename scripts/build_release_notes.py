@@ -93,7 +93,7 @@ def main() -> None:
                     f"{metadata['last_candle_close']}"
                 ),
                 f"- Bars: {metadata['bars']}",
-                "- Market data source: Hyperliquid candleSnapshot API",
+                f"- Market data source: {metadata.get('source', 'unknown')}",
             ]
         )
     else:
