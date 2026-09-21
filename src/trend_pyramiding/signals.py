@@ -27,8 +27,3 @@ def resolve_entry_signal(
             raise ValueError(f"signal column not found: {signal_column}")
         return frame[signal_column].fillna(False).astype(bool)
     return breakout_long_signal(frame, ema_period, breakout_lookback)
-
-
-def strong_close_signal(frame: pd.DataFrame) -> pd.Series:
-    """A closed candle finishes in its upper half; no market-specific threshold."""
-    return (frame["close"] >= (frame["high"] + frame["low"]) / 2).fillna(False)

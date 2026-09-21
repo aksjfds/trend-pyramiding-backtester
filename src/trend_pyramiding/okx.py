@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import time
@@ -28,6 +29,10 @@ class OKXError(RuntimeError):
     def __init__(self, code: str, operation: str):
         self.code = str(code)
         super().__init__(f"OKX {operation} failed (code={self.code})")
+
+
+class TransientRead(OKXError):
+    """A temporary read failure; never raised for a write."""
 
 
 class UncertainWrite(RuntimeError):
@@ -105,6 +110,7 @@ class OKXClient:
         self.write_enabled = write_enabled
         self.timeout = timeout
         self.offset = 0.0
+        self.write_attempts = 0
         self.opener = opener or urllib.request.build_opener(_NoRedirect())
 
     def now(self) -> float:
@@ -131,6 +137,8 @@ class OKXClient:
         encoded = (
             json.dumps(body, separators=(",", ":"), allow_nan=False) if body is not None else ""
         )
+        if method != "GET":
+            self.write_attempts += 1
         for attempt in range(3 if method == "GET" else 1):
             headers = {"Content-Type": "application/json", "User-Agent": "trend-pyramiding/0.1"}
             if self.demo:
@@ -164,13 +172,30 @@ class OKXClient:
             try:
                 with self.opener.open(request, timeout=self.timeout) as response:
                     raw = json.load(response)
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                exc.close()
+                if method != "GET":
+                    raise UncertainWrite(f"uncertain {method} {path} (HTTP {status})") from None
+                if status not in {408, 429, 500, 502, 503, 504}:
+                    raise OKXError(f"http_{status}", path) from None
+                if attempt == 2:
+                    raise TransientRead(f"http_{status}", path) from None
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                OSError,
+                ValueError,
+                http.client.HTTPException,
+            ):
                 if method != "GET":
                     raise UncertainWrite(
                         f"uncertain {method} {path}; reconcile before continuing"
                     ) from None
                 if attempt == 2:
-                    raise OKXError("transport", path) from None
+                    raise TransientRead("transport", path) from None
                 time.sleep(0.5 * (attempt + 1))
                 continue
             if not isinstance(raw, dict) or "code" not in raw:
@@ -178,6 +203,20 @@ class OKXClient:
                     raise UncertainWrite(f"invalid response to {method} {path}")
                 raise OKXError("invalid_response", path)
             if str(raw["code"]) != "0":
+                if method == "GET" and private and str(raw["code"]) == "50102" and attempt < 2:
+                    self.sync_time()
+                    continue
+                if method == "GET" and str(raw["code"]) in {
+                    "50001",
+                    "50004",
+                    "50011",
+                    "50013",
+                    "50040",
+                }:
+                    if attempt == 2:
+                        raise TransientRead(str(raw["code"]), path)
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
                 if method != "GET" and str(raw["code"]) in {"50004", "50001", "50013"}:
                     raise UncertainWrite(
                         f"OKX response leaves {method} {path} uncertain (code={raw['code']})"
@@ -206,6 +245,7 @@ class Instrument:
     tick: Decimal
     max_size: Decimal
     fee_group: str = ""
+    category: str = "1"
 
     @classmethod
     def parse(cls, row: dict) -> Instrument:
@@ -216,10 +256,12 @@ class Instrument:
             or row.get("ctType") != "linear"
             or row.get("state") != "live"
             or row.get("ctValCcy") != base
-            or row.get("instCategory") != "1"
+            or row.get("instCategory") not in {"1", "3", "4"}
             or row.get("ruleType") != "normal"
         ):
-            raise ValueError("only normal live crypto linear USDT swaps are supported")
+            raise ValueError(
+                "only normal live crypto, stock or metal linear USDT swaps are supported"
+            )
         values = [
             dec(row["ctVal"]) * dec(row.get("ctMult") or "1"),
             dec(row["lotSz"]),
@@ -229,7 +271,7 @@ class Instrument:
         ]
         if any(v <= 0 for v in values):
             raise ValueError("invalid contract specifications")
-        return cls(row["instId"], *values, row.get("groupId", ""))
+        return cls(row["instId"], *values, row.get("groupId", ""), row["instCategory"])
 
 
 def universe(client: OKXClient, count: int, requested: tuple[str, ...] = ()) -> list[Instrument]:
@@ -246,7 +288,7 @@ def universe(client: OKXClient, count: int, requested: tuple[str, ...] = ()) -> 
         return [instruments[k] for k in requested]
     ranked = []
     for row in client.get("/api/v5/market/tickers", {"instType": "SWAP"}, private=False):
-        if row["instId"] in instruments:
+        if row["instId"] in instruments and instruments[row["instId"]].category == "1":
             turnover = dec(row.get("volCcy24h") or "0") * dec(row.get("last") or "0")
             if turnover > 0:
                 ranked.append((turnover, row["instId"]))

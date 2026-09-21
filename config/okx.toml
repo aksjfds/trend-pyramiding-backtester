@@ -4,8 +4,8 @@
 base_url = "https://openapi.okx.com"
 demo = false
 bar = "1H"
-leverage = 2
-capital_fraction = 0.20
+leverage = 5
+capital_fraction = 1
 top_n = 5
 # Empty: choose the five highest-turnover live USDT linear swaps on first start.
 # The selected universe is persisted and never rotated while managing positions.

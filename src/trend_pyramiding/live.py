@@ -9,7 +9,7 @@ import time
 import tomllib
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import pandas as pd
@@ -17,8 +17,33 @@ import pandas as pd
 from .cli import _config_from_toml
 from .engine import BacktestConfig, _initial_stop, _load_frame
 from .indicators import atr, prior_rolling_high, rolling_structure_low
-from .okx import HOSTS, Instrument, OKXClient, OKXError, dec, number, rounded, universe
+from .okx import (
+    HOSTS,
+    Instrument,
+    OKXClient,
+    OKXError,
+    TransientRead,
+    dec,
+    number,
+    rounded,
+    universe,
+)
 from .signals import breakout_long_signal
+
+BAR_SECONDS = {
+    "15m": 900,
+    "30m": 1800,
+    "1H": 3600,
+    "2H": 7200,
+    "4H": 14400,
+    "6Hutc": 21600,
+    "12Hutc": 43200,
+    "1Dutc": 86400,
+}
+
+
+class MarketUnavailable(ValueError):
+    """Public market data is temporarily unsuitable for execution."""
 
 
 @dataclass(frozen=True)
@@ -39,10 +64,12 @@ class LiveConfig:
     def validate(self):
         if self.base_url not in HOSTS or not isinstance(self.demo, bool):
             raise ValueError("invalid host or demo flag")
-        if self.bar != "1H" or self.leverage != 2:
-            raise ValueError("this runner requires 1H bars and 2x isolated leverage")
-        if not 0 < self.capital_fraction <= 0.20:
-            raise ValueError("capital_fraction must be in (0, 0.20]")
+        if self.bar not in BAR_SECONDS:
+            raise ValueError("unsupported candle interval")
+        if type(self.leverage) is not int or not 1 <= self.leverage <= 125:
+            raise ValueError("leverage must be an integer in [1, 125]")
+        if isinstance(self.capital_fraction, bool) or not 0 < self.capital_fraction <= 1:
+            raise ValueError("capital_fraction must be in (0, 1]")
         if (
             not isinstance(self.top_n, int)
             or not 1 <= self.top_n <= 10
@@ -67,35 +94,39 @@ class LiveConfig:
         cfg = cls(**raw)
         cfg.validate()
         strategy = _config_from_toml(path.parent / cfg.strategy_config)
-        strategy.validate()
-        for value in asdict(strategy).values():
-            if isinstance(value, (float, int)) and not isinstance(value, bool):
-                dec(value)
-            elif isinstance(value, tuple):
-                for weight in value:
-                    dec(weight)
-        for key in (
-            "atr_period",
-            "structure_lookback",
-            "ema_period",
-            "entry_breakout_lookback",
-            "add_breakout_lookback",
-        ):
-            value = getattr(strategy, key)
-            if not isinstance(value, int) or not 1 <= value <= 100:
-                raise ValueError(f"live {key} must be an integer in [1, 100]")
-        for key in (
-            "atr_stop_mult",
-            "add_step_atr",
-            "trail_atr_mult",
-            "trail_activation_r",
-            "break_even_r",
-        ):
-            if getattr(strategy, key) <= 0:
-                raise ValueError(f"live {key} must be positive")
-        if strategy.fee_bps < 0 or strategy.structure_buffer_atr < 0:
-            raise ValueError("negative fees/buffer are unsupported")
+        validate_strategy(strategy)
         return cfg, strategy
+
+
+def validate_strategy(strategy):
+    strategy.validate()
+    for value in asdict(strategy).values():
+        if isinstance(value, (float, int)) and not isinstance(value, bool):
+            dec(value)
+        elif isinstance(value, tuple):
+            for weight in value:
+                dec(weight)
+    for key in (
+        "atr_period",
+        "structure_lookback",
+        "ema_period",
+        "entry_breakout_lookback",
+        "add_breakout_lookback",
+    ):
+        value = getattr(strategy, key)
+        if not isinstance(value, int) or not 1 <= value <= 100:
+            raise ValueError(f"live {key} must be an integer in [1, 100]")
+    for key in (
+        "atr_stop_mult",
+        "add_step_atr",
+        "trail_atr_mult",
+        "trail_activation_r",
+        "break_even_r",
+    ):
+        if getattr(strategy, key) <= 0:
+            raise ValueError(f"live {key} must be positive")
+    if strategy.fee_bps < 0 or strategy.structure_buffer_atr < 0:
+        raise ValueError("negative fees/buffer are unsupported")
 
 
 class StateStore:
@@ -160,37 +191,89 @@ class StateStore:
             os.close(directory)
 
     def event(self, event, **details):
+        # Keep disk use bounded; durable orders/positions live in the separate state file.
+        path = self.path.with_suffix(".events.jsonl")
+        if path.exists() and path.stat().st_size >= 5 * 1024 * 1024:
+            for index in range(4, 0, -1):
+                source = path.with_name(path.name + f".{index}")
+                if source.exists():
+                    os.replace(source, path.with_name(path.name + f".{index + 1}"))
+            os.replace(path, path.with_name(path.name + ".1"))
         record = {"time": pd.Timestamp.now(tz="UTC").isoformat(), "event": event, **details}
-        with self.path.with_suffix(".events.jsonl").open("a") as handle:
+        with path.open("a") as handle:
             handle.write(json.dumps(record, allow_nan=False) + "\n")
         print(json.dumps(record, ensure_ascii=False), flush=True)
 
 
-def account_snapshot(client: OKXClient) -> dict:
-    account = client.get("/api/v5/account/config")[0]
-    if account.get("acctLv") not in {"2", "3"} or account.get("posMode") != "net_mode":
-        raise ValueError("set OKX Futures or Multi-currency margin account to net position mode")
+def account_snapshot(client: OKXClient, *, for_trading=True) -> dict:
+    warnings = []
+    try:
+        account = client.get("/api/v5/account/config")[0]
+    except (ValueError, RuntimeError, OSError, IndexError) as exc:
+        if for_trading:
+            raise
+        account = {}
+        warnings.append(f"账户配置读取失败：{exc}")
     balances = client.get("/api/v5/account/balance")[0]
     usdt = next((x for x in balances["details"] if x["ccy"] == "USDT"), {})
     equity_usd = float(dec(balances["totalEq"]))
     usdt_equity = float(dec(usdt.get("eq") or "0"))
     usdt_equity_usd = float(dec(usdt.get("eqUsd") or "0"))
-    if usdt_equity <= 0 or usdt_equity_usd <= 0:
-        raise ValueError("positive USDT collateral with an exchange USD valuation is required")
-    equity = equity_usd / (usdt_equity_usd / usdt_equity)
-    available = float(dec(usdt.get("availBal") or "0"))
-    # Borrowed collateral is never used by this runner.
-    if dec(usdt.get("liab") or "0") > 0 or account.get("autoLoan") is True:
-        raise ValueError("USDT borrowing/automatic borrowing must be disabled")
-    if equity <= 0:
-        raise ValueError("account equity must be positive")
+    equity = (
+        equity_usd / (usdt_equity_usd / usdt_equity)
+        if usdt_equity > 0 and usdt_equity_usd > 0
+        else None
+    )
+    available_raw = usdt.get("availBal")
+    if available_raw in (None, ""):
+        available_raw = usdt.get("availEq")
+    available = (
+        float(dec(available_raw))
+        if available_raw not in (None, "")
+        else (0.0 if not usdt else None)
+    )
+    problems = []
+    if account.get("acctLv") not in {"2", "3"} or account.get("posMode") != "net_mode":
+        problems.append("set OKX Futures or Multi-currency margin account to net position mode")
+    if equity is None:
+        problems.append("positive USDT collateral with an exchange USD valuation is required")
+    if dec(usdt.get("liab") or "0") > 0 or account.get("autoLoan") in (True, "true"):
+        problems.append("USDT borrowing/automatic borrowing must be disabled")
+    if equity_usd <= 0:
+        problems.append("account equity must be positive")
+    if available is None:
+        problems.append("available USDT balance is unavailable")
+    if for_trading and problems:
+        raise ValueError(problems[0])
+    warnings.extend(problems)
     return {
-        "uid": account["uid"],
+        "uid": account.get("uid"),
         "equity": equity,
         "equity_usd": equity_usd,
         "available_usdt": available,
         "trade_permission": "trade" in account.get("perm", "").split(","),
+        "warnings": warnings,
     }
+
+
+def selected_config(config, store):
+    selection = StateStore(store.path.with_suffix(".selection.json")).load()
+    if selection is None:
+        return config
+    instruments = selection.get("instruments")
+    if not isinstance(instruments, list) or any(not isinstance(x, str) for x in instruments):
+        raise ValueError("币种选择文件格式错误")
+    config = replace(config, instruments=tuple(instruments))
+    config.validate()
+    return config
+
+
+def config_fingerprint(config, strategy, uid):
+    return hashlib.sha256(
+        json.dumps(
+            {"live": asdict(config), "strategy": asdict(strategy), "uid": uid}, sort_keys=True
+        ).encode()
+    ).hexdigest()
 
 
 def taker_fee(client: OKXClient, instrument: Instrument) -> float:
@@ -210,26 +293,33 @@ def taker_fee(client: OKXClient, instrument: Instrument) -> float:
     raise ValueError("USDT swap taker fee could not be determined")
 
 
-def closed_candles(client: OKXClient, instrument: str, strategy: BacktestConfig) -> pd.DataFrame:
+def closed_candles(
+    client: OKXClient, instrument: str, strategy: BacktestConfig, bar="1H"
+) -> pd.DataFrame:
     rows = client.get(
-        "/api/v5/market/candles", {"instId": instrument, "bar": "1H", "limit": "300"}, private=False
+        "/api/v5/market/candles", {"instId": instrument, "bar": bar, "limit": "300"}, private=False
     )
     closed = [r for r in rows if len(r) >= 9 and r[8] == "1"]
     if len(closed) < max(
-        100, strategy.ema_period + 1, strategy.atr_period + 1, strategy.entry_breakout_lookback + 1
+        100,
+        strategy.ema_period + 1,
+        strategy.atr_period + 1,
+        strategy.entry_breakout_lookback + 1,
+        strategy.structure_lookback + 1,
+        strategy.add_breakout_lookback + 1,
     ):
-        raise ValueError("insufficient confirmed candle history")
+        raise MarketUnavailable("insufficient confirmed candle history")
     frame = pd.DataFrame(
         [r[:6] for r in closed], columns=["timestamp", "open", "high", "low", "close", "volume"]
     )
     frame["timestamp"] = pd.to_datetime(frame["timestamp"].astype("int64"), unit="ms", utc=True)
     frame = _load_frame(frame)
     if frame.isna().any().any():
-        raise ValueError("missing candle values")
+        raise MarketUnavailable("missing candle values")
     if any(not dec(v).is_finite() for v in frame[["open", "high", "low", "close"]].to_numpy().flat):
-        raise ValueError("invalid candle prices")
-    if not frame["timestamp"].diff().dropna().dt.total_seconds().eq(3600).all():
-        raise ValueError("candle history has gaps")
+        raise MarketUnavailable("invalid candle prices")
+    if not frame["timestamp"].diff().dropna().dt.total_seconds().eq(BAR_SECONDS[bar]).all():
+        raise MarketUnavailable("candle history has gaps")
     frame["atr"] = atr(frame, strategy.atr_period)
     frame["structure_low"] = rolling_structure_low(frame["low"], strategy.structure_lookback)
     frame["add_prior_high"] = prior_rolling_high(frame["high"], strategy.add_breakout_lookback)
@@ -267,7 +357,7 @@ def size_contracts(
     risk_per_base = price - stop + fee_rate * (price + stop)
     market_cap = min(market_budget, position["market_budget"]) if position else market_budget
     market_cap *= strategy.max_position_pct
-    # Reserve both entry and exit fees in the 20% capital envelope.
+    # Reserve both entry and exit fees within the configured capital envelope.
     cost_per_base = price / leverage + 2 * fee_rate * price
     remaining_market = max(market_cap - qty * cost_per_base, 0)
     margin = min(
@@ -291,6 +381,8 @@ class SwapRunner:
         self.state = None
         self.instruments = {}
         self.fees = {}
+        self.market_warnings = {}
+        self.stop_requested = lambda: False
 
     def save(self):
         self.store.save(self.state)
@@ -301,25 +393,45 @@ class SwapRunner:
         if not account["trade_permission"]:
             raise ValueError("API key requires trade permission before starting the runner")
         self.state = self.store.load()
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "live": asdict(self.config),
-                    "strategy": asdict(self.strategy),
-                    "uid": account["uid"],
-                },
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+        fingerprint = config_fingerprint(self.config, self.strategy, account["uid"])
+        selection_changed = False
+        previous_capital_fraction = None
         if self.state and self.state["fingerprint"] != fingerprint:
-            raise ValueError(
-                "account/config differs from saved state; do not reuse or delete active state"
+            # Universe changes or explicitly saved parameters require a matching prior account and flat state.
+            old_choices = [(), tuple(self.state["markets"])]
+            if self.state.get("configured_instruments") is not None:
+                old_choices.append(tuple(self.state["configured_instruments"]))
+            selection_changed = any(
+                config_fingerprint(
+                    replace(self.config, instruments=choice), self.strategy, account["uid"]
+                )
+                == self.state["fingerprint"]
+                for choice in old_choices
             )
-        requested = tuple(self.state["markets"]) if self.state else self.config.instruments
+            if not selection_changed:
+                from .settings import migration_source
+
+                previous = migration_source(self.store, self.state, account["uid"], self.config)
+                if previous:
+                    selection_changed = True
+                    previous_capital_fraction = previous.capital_fraction
+            if (
+                not selection_changed
+                or self.state["pending"]
+                or any(m["position"] for m in self.state["markets"].values())
+            ):
+                raise ValueError(
+                    "account/config differs from saved state; do not reuse or delete active state"
+                )
+        requested = (
+            tuple(self.state["markets"])
+            if self.state and not selection_changed
+            else self.config.instruments
+        )
         selected = universe(self.client, self.config.top_n, requested)
         self.instruments = {i.inst_id: i for i in selected}
         positions = self.client.get("/api/v5/account/positions")
-        if not self.state:
+        if not self.state or selection_changed:
             if any(dec(p.get("pos") or "0") != 0 for p in positions):
                 raise ValueError("first start requires an account without open positions")
             if self.client.get("/api/v5/trade/orders-pending"):
@@ -327,26 +439,41 @@ class SwapRunner:
             for kind in ("conditional", "oco", "trigger", "move_order_stop"):
                 if self.client.get("/api/v5/trade/orders-algo-pending", {"ordType": kind}):
                     raise ValueError("first start requires no pending algorithmic orders")
+            ceiling = (
+                self.state["capital_ceiling"]
+                if self.state
+                else account["equity"] * self.config.capital_fraction
+            )
+            if self.state and previous_capital_fraction is not None:
+                ceiling *= self.config.capital_fraction / previous_capital_fraction
             self.state = {
                 "version": 1,
+                "configured_instruments": list(self.config.instruments),
                 "fingerprint": fingerprint,
-                "capital_ceiling": account["equity"] * self.config.capital_fraction,
+                "configuration": {"live": asdict(self.config), "strategy": asdict(self.strategy)},
+                "capital_ceiling": ceiling,
                 "pending": None,
                 "markets": {i.inst_id: {"last_bar": None, "position": None} for i in selected},
             }
             self.save()
         for instrument in selected:
+            if self.stop_requested():
+                return
             # Account leverage is only changed inside the user-invoked run command.
             self.client.post(
                 "/api/v5/account/set-leverage",
-                {"instId": instrument.inst_id, "lever": "2", "mgnMode": "isolated"},
+                {
+                    "instId": instrument.inst_id,
+                    "lever": str(self.config.leverage),
+                    "mgnMode": "isolated",
+                },
             )
             info = self.client.get(
                 "/api/v5/account/leverage-info",
                 {"instId": instrument.inst_id, "mgnMode": "isolated"},
             )
-            if not info or any(dec(x["lever"]) != 2 for x in info):
-                raise ValueError("2x isolated leverage verification failed")
+            if not info or any(dec(x["lever"]) != self.config.leverage for x in info):
+                raise ValueError("configured isolated leverage verification failed")
             self.fees[instrument.inst_id] = max(
                 taker_fee(self.client, instrument), self.strategy.fee_bps / 10000
             )
@@ -357,7 +484,7 @@ class SwapRunner:
             demo=self.config.demo,
             instruments=list(self.instruments),
             capital_ceiling=self.state["capital_ceiling"],
-            leverage=2,
+            leverage=self.config.leverage,
         )
 
     def _order(self, market: str, payload: dict, context: dict):
@@ -461,7 +588,7 @@ class SwapRunner:
             p.get("mgnMode") != "isolated"
             or p.get("posSide") != "net"
             or dec(p["pos"]) < 0
-            or dec(p["lever"]) != 2
+            or dec(p["lever"]) != self.config.leverage
             for p in rows
         ):
             raise RuntimeError("unexpected position mode, direction or leverage; inspect OKX")
@@ -516,7 +643,8 @@ class SwapRunner:
                         "/api/v5/trade/cancel-algos", [{"instId": market, "algoId": algo["algoId"]}]
                     )
             # Do not act on a signal that predates this exit.
-            close_boundary = int(self.client.now() // 3600) * 3600 - 3600
+            seconds = BAR_SECONDS[self.config.bar]
+            close_boundary = int(self.client.now() // seconds) * seconds - seconds
             self.state["markets"][market]["last_bar"] = pd.Timestamp(
                 close_boundary, unit="s", tz="UTC"
             ).isoformat()
@@ -606,13 +734,22 @@ class SwapRunner:
         self.store.event("stop_raised", instrument=market, stop=stop)
 
     def quote(self, market):
-        ticker = self.client.get("/api/v5/market/ticker", {"instId": market}, private=False)[0]
+        rows = self.client.get("/api/v5/market/ticker", {"instId": market}, private=False)
+        if not rows or not rows[0].get("bidPx") or not rows[0].get("askPx"):
+            raise MarketUnavailable("market has no executable quote")
+        ticker = rows[0]
         if not 0 <= self.client.now() - float(ticker["ts"]) / 1000 <= 15:
-            raise ValueError("stale market quote")
+            raise MarketUnavailable("stale market quote")
         bid, ask = float(dec(ticker["bidPx"])), float(dec(ticker["askPx"]))
         if bid <= 0 or ask < bid or (ask - bid) / bid * 10000 > self.config.max_spread_bps:
-            raise ValueError("market spread exceeds execution limit")
+            raise MarketUnavailable("market spread exceeds execution limit")
         return bid, ask
+
+    def market_warning(self, market, error):
+        detail = str(error)
+        if self.market_warnings.get(market) != detail:
+            self.store.event("market_deferred", instrument=market, detail=detail)
+        self.market_warnings[market] = detail
 
     def step(self, stop_requested=lambda: False):
         if self.state["pending"]:
@@ -620,16 +757,29 @@ class SwapRunner:
         if self.client.get("/api/v5/trade/orders-pending"):
             raise RuntimeError("unexpected pending ordinary orders; reconcile before trading")
         for market in self.instruments:
+            if stop_requested():
+                return
             self.reconcile(market)
         account = account_snapshot(self.client)
         budget = min(
             self.state["capital_ceiling"], account["equity"] * self.config.capital_fraction
         )
         used_margin = 0.0
+        blocked_markets = set()
         for market, instrument in self.instruments.items():
+            if stop_requested():
+                return
             position = self.state["markets"][market]["position"]
             if position:
-                _, ask = self.quote(market)
+                try:
+                    _, ask = self.quote(market)
+                except (MarketUnavailable, TransientRead) as exc:
+                    self.market_warning(market, exc)
+                    blocked_markets.add(market)
+                    # Reserve the full budget when exposure cannot be valued.
+                    # Stop maintenance continues, but no market can add exposure.
+                    used_margin = max(used_margin, budget)
+                    continue
                 notional = float(dec(position["qty"]) * instrument.contract_value) * max(
                     ask, position["avg"]
                 )
@@ -637,15 +787,25 @@ class SwapRunner:
         for market, instrument in self.instruments.items():
             if stop_requested():
                 return
-            frame = closed_candles(self.client, market, self.strategy)
+            try:
+                frame = closed_candles(self.client, market, self.strategy, self.config.bar)
+                # Check before consuming a candle so public-data failures are recoverable.
+                if not self.state["markets"][market]["position"]:
+                    self.quote(market)
+            except (MarketUnavailable, TransientRead) as exc:
+                self.market_warning(market, exc)
+                continue
             row = frame.iloc[-1]
             bar = row["timestamp"].isoformat()
             item = self.state["markets"][market]
+            age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
+            if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
+                self.market_warning(market, "latest confirmed candle is stale or in the future")
+                continue
+            if market not in blocked_markets and self.market_warnings.pop(market, None):
+                self.store.event("market_recovered", instrument=market)
             if item["last_bar"] is not None and pd.Timestamp(bar) <= pd.Timestamp(item["last_bar"]):
                 continue
-            age = self.client.now() - row["timestamp"].timestamp() - 3600
-            if age < 0 or age > 3700:
-                raise ValueError("latest confirmed candle is stale or in the future")
             if item["position"] and item["last_bar"]:
                 missed = frame[frame["timestamp"] > pd.Timestamp(item["last_bar"])]
                 if len(missed):
@@ -678,7 +838,11 @@ class SwapRunner:
             if not signal or stop is None:
                 continue
             stop = float(rounded(stop, instrument.tick))
-            bid, ask = self.quote(market)
+            try:
+                bid, ask = self.quote(market)
+            except (MarketUnavailable, TransientRead) as exc:
+                self.market_warning(market, exc)
+                continue
             # Skip a signal if price already crossed its stop or retraced its add threshold.
             if bid <= stop:
                 continue
@@ -747,7 +911,7 @@ class SwapRunner:
             )
             # Reserve conservatively for this iteration, even if FOK was canceled.
             cost = float(quantity * instrument.contract_value * limit) * (
-                0.5 + 2 * self.fees[market]
+                1 / self.config.leverage + 2 * self.fees[market]
             )
             used_margin += cost
             account["available_usdt"] = max(account["available_usdt"] - cost, 0)

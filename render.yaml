@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: trend-pyramiding
+    runtime: python
+    plan: 0.5c-512mb
+    numInstances: 1
+    buildCommand: pip install '.[cloud]'
+    startCommand: pyramid-render
+    healthCheckPath: /healthz
+    autoDeployTrigger: "off"
+    maxShutdownDelaySeconds: 300
+    disk:
+      name: trading-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYRAMID_CONFIG
+        value: config/okx.toml
+      - key: PYRAMID_STATE_DIR
+        value: /var/data/pyramid
+      - key: PYRAMID_DISK_PATH
+        value: /var/data
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYRAMID_WEB_PASSWORD
+        generateValue: true
+      - key: OKX_API_KEY
+        sync: false
+      - key: OKX_API_SECRET
+        sync: false
+      - key: OKX_API_PASSPHRASE
+        sync: false

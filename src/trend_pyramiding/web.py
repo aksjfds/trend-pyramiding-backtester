@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import http.client
 import json
 import os
 import secrets
@@ -13,12 +15,15 @@ import threading
 import time
 import webbrowser
 from collections import deque
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 
-from .live import LiveConfig, StateStore
-from .okx import Credentials
+from .live import LiveConfig, StateStore, selected_config
+from .local_credentials import load_local_credentials
+from .okx import Credentials, Instrument, OKXClient, dec
+from .settings import load_settings, save_settings, schema, settings_values
 
 MODES = {
     "watch": (False, False),
@@ -31,7 +36,7 @@ MODES = {
 class Controller:
     def __init__(self, config: Path, state_dir: Path):
         self.config_path = config.resolve()
-        self.config, _ = LiveConfig.load(self.config_path)
+        self.config, self.strategy = LiveConfig.load(self.config_path)
         self.state_dir = state_dir.resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = threading.RLock()
@@ -43,9 +48,14 @@ class Controller:
         self.logs = deque(maxlen=300)
         self.accounts = {}
         self.checking = False
+        self.catalogs = {}
+        self.catalog_lock = threading.Lock()
         self.heartbeat = self.state_dir / "web-heartbeat.json"
 
     def redact(self, text):
+        password = os.environ.get("PYRAMID_WEB_PASSWORD")
+        if password:
+            text = text.replace(password, "[已隐藏]")
         for prefix in ("OKX_", "OKX_DEMO_"):
             for suffix in ("API_KEY", "API_SECRET", "API_PASSPHRASE"):
                 value = os.environ.get(prefix + suffix)
@@ -63,6 +73,102 @@ class Controller:
 
     def store(self, demo):
         return StateStore(self.state_dir / f"okx-{'demo' if demo else 'live'}.json")
+
+    def catalog(self, mode="watch"):
+        demo, _ = self.profile(mode)
+        if not self.catalog_lock.acquire(blocking=False):
+            raise ValueError("币种列表正在刷新，请稍后重试")
+        try:
+            cached = self.catalogs.get(demo)
+            if cached and time.time() - cached["time"] < 300:
+                return cached["items"]
+            client = OKXClient(base_url=self.config.base_url, demo=demo, timeout=8)
+            eligible = {}
+            for row in client.get(
+                "/api/v5/public/instruments", {"instType": "SWAP"}, private=False
+            ):
+                try:
+                    instrument = Instrument.parse(row)
+                    eligible[instrument.inst_id] = instrument.category
+                except (ValueError, KeyError):
+                    continue
+            items = []
+            for row in client.get("/api/v5/market/tickers", {"instType": "SWAP"}, private=False):
+                if row["instId"] in eligible:
+                    turnover = float(dec(row.get("volCcy24h") or "0") * dec(row.get("last") or "0"))
+                    if turnover > 0:
+                        items.append(
+                            {
+                                "instrument": row["instId"],
+                                "turnover": turnover,
+                                "category": eligible[row["instId"]],
+                            }
+                        )
+            items.sort(key=lambda item: item["turnover"], reverse=True)
+            if not items:
+                raise ValueError("暂无可用 USDT 永续合约，请稍后重试")
+            self.catalogs[demo] = {"time": time.time(), "items": items}
+            return items
+        finally:
+            self.catalog_lock.release()
+
+    def save_selection(self, mode, instruments):
+        demo, _ = self.profile(mode)
+        if (
+            not isinstance(instruments, list)
+            or len(instruments) > 10
+            or any(not isinstance(x, str) for x in instruments)
+            or len(set(instruments)) != len(instruments)
+        ):
+            raise ValueError("请选择最多 10 个不同的永续合约")
+        if instruments:
+            available = {item["instrument"] for item in self.catalog(mode)}
+            if not set(instruments) <= available:
+                raise ValueError("所选币种不支持交易或已下架，请刷新币种列表")
+        with self.lock:
+            if self.closing or self.checking or (self.process and self.process.poll() is None):
+                raise ValueError("请等待账户读取完成并停止运行后再更改币种")
+            store = self.store(demo)
+            with store.lock():
+                state = store.load()
+                if store.halt_path.exists() or (
+                    state
+                    and (
+                        state.get("pending")
+                        or any(x.get("position") for x in state["markets"].values())
+                    )
+                ):
+                    raise ValueError("当前仍有持仓、待核对订单或暂停记录，不能更换币种")
+                StateStore(store.path.with_suffix(".selection.json")).save(
+                    {"version": 1, "instruments": instruments}
+                )
+                cached = self.accounts.get("demo" if demo else "live")
+                if cached and cached.get("data"):
+                    cached["data"]["instruments"] = list(instruments)
+
+    def effective_settings(self, demo):
+        config, strategy = load_settings(
+            replace(self.config, demo=demo), self.strategy, self.store(demo)
+        )
+        return selected_config(config, self.store(demo)), strategy
+
+    def save_parameters(self, mode, values):
+        demo, _ = self.profile(mode)
+        with self.lock:
+            if self.closing or self.checking or (self.process and self.process.poll() is None):
+                raise ValueError("请等待账户读取完成并停止策略后再修改参数")
+            if self.busy_profiles():
+                raise ValueError("另一个策略进程正在运行，请先停止")
+            store = self.store(demo)
+            with store.lock():
+                config, strategy = self.effective_settings(demo)
+                config, strategy = save_settings(config, strategy, store, values)
+                cached = self.accounts.get("demo" if demo else "live")
+                if cached and cached.get("data"):
+                    equity = cached["data"].get("account_equity_usdt_equivalent")
+                    cached["data"]["capital_limit_usdt_approx"] = (
+                        equity * config.capital_fraction if equity is not None else None
+                    )
 
     def command(self, mode, *, check=False):
         demo, trading = self.profile(mode)
@@ -102,12 +208,17 @@ class Controller:
             demo, trading = self.profile(mode)
             if mode == "live" and confirm_live is not True:
                 raise ValueError("请明确点击启动实盘交易")
+            self.effective_settings(demo)  # Validate saved parameters before spawning a worker.
             Credentials.load(demo)
             if self.busy_profiles():
                 raise ValueError("状态目录正被其他策略进程使用，请先在原终端停止该进程")
             if trading and self.store(demo).halt_path.exists():
                 raise ValueError("策略因异常暂停，请核查日志和订单后使用 clear-halt，再启动")
-            env = dict(os.environ, PYRAMID_HEARTBEAT_FILE=str(self.heartbeat))
+            env = dict(
+                os.environ,
+                PYRAMID_HEARTBEAT_FILE=str(self.heartbeat),
+                PYRAMID_PARENT_PID=str(os.getpid()),
+            )
             self.heartbeat.unlink(missing_ok=True)
             process = subprocess.Popen(
                 self.command(mode),
@@ -190,6 +301,7 @@ class Controller:
                     "trade_permission",
                 )
             }
+            report["warnings"] = data.get("warnings", [])
             with self.lock:
                 self.accounts[key] = {"time": time.time(), "data": report, "error": None}
         except (ValueError, OSError, subprocess.TimeoutExpired, KeyError) as exc:
@@ -255,6 +367,16 @@ class Controller:
                         }
                 except (OSError, ValueError, AttributeError):
                     pass
+            selected = []
+            try:
+                selected = list(selected_config(self.config, store).instruments)
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
+                error = "无法读取币种选择，请检查 selection.json；不要删除交易状态"
+            config, strategy = replace(self.config, demo=demo), self.strategy
+            try:
+                config, strategy = self.effective_settings(demo)
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
+                error = "无法读取已保存参数，请检查 settings.json"
             credential_status = {}
             for is_demo in (False, True):
                 try:
@@ -274,10 +396,26 @@ class Controller:
                 "credentials": credential_status,
                 "checking": self.checking,
                 "config": {
-                    "bar": self.config.bar,
-                    "leverage": self.config.leverage,
-                    "capital_fraction": self.config.capital_fraction,
-                    "top_n": self.config.top_n,
+                    "bar": config.bar,
+                    "leverage": config.leverage,
+                    "capital_fraction": config.capital_fraction,
+                    "top_n": config.top_n,
+                },
+                "parameters": {"values": settings_values(config, strategy), "fields": schema()},
+                "selection": {
+                    "instruments": selected,
+                    "locked": bool(
+                        running
+                        or halt
+                        or error
+                        or (
+                            state
+                            and (
+                                state.get("pending")
+                                or any(m.get("position") for m in state.get("markets", {}).values())
+                            )
+                        )
+                    ),
                 },
                 "account": self.accounts.get(profile),
                 "markets": rows,
@@ -287,6 +425,24 @@ class Controller:
                 "state_error": error,
                 "logs": list(self.logs),
             }
+
+
+def panel_identity(config, state_dir):
+    return hashlib.sha256(f"{config.resolve()}|{state_dir.resolve()}".encode()).hexdigest()
+
+
+def existing_panel(port, config, state_dir):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        return response.status == 200 and response.getheader(
+            "X-Pyramid-Instance"
+        ) == panel_identity(config, state_dir)
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 class PanelServer(ThreadingHTTPServer):
@@ -300,6 +456,8 @@ class PanelServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 15
+
     def log_message(self, *args):
         pass
 
@@ -310,6 +468,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "X-Pyramid-Instance",
+            panel_identity(self.server.controller.config_path, self.server.controller.state_dir),
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -349,14 +511,19 @@ class Handler(BaseHTTPRequestHandler):
                 path
             ]
             self.send(200, content.encode(), kind + "; charset=utf-8")
-        elif path == "/api/status":
+        elif path in ("/api/status", "/api/instruments"):
             from urllib.parse import parse_qs
 
             try:
                 selected = parse_qs(query).get("mode", ["watch"])[0]
-                self.send(200, self.server.controller.snapshot(selected))
-            except ValueError as exc:
-                self.send(400, {"error": str(exc)})
+                result = (
+                    self.server.controller.snapshot(selected)
+                    if path == "/api/status"
+                    else {"items": self.server.controller.catalog(selected)}
+                )
+                self.send(200, result)
+            except (ValueError, RuntimeError, OSError) as exc:
+                self.send(400, {"error": self.server.controller.redact(str(exc))})
         else:
             self.send(404, {"error": "未找到页面"})
 
@@ -368,7 +535,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 2048:
+            if not 0 < length <= 4096:
                 raise ValueError("请求长度无效")
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
@@ -378,13 +545,17 @@ class Handler(BaseHTTPRequestHandler):
                 controller.start(data.get("mode", "watch"), data.get("confirm_live", False))
             elif self.path == "/api/stop":
                 controller.stop()
+            elif self.path == "/api/settings":
+                controller.save_parameters(data.get("mode", "watch"), data.get("values"))
+            elif self.path == "/api/selection":
+                controller.save_selection(data.get("mode", "watch"), data.get("instruments"))
             elif self.path == "/api/check":
                 controller.check(data.get("mode", "watch"))
             else:
                 self.send(404, {"error": "操作不存在"})
                 return
             self.send(200, {"ok": True})
-        except (ValueError, OSError) as exc:
+        except (ValueError, RuntimeError, OSError) as exc:
             self.send(400, {"error": self.server.controller.redact(str(exc))})
 
 
@@ -400,7 +571,13 @@ def main():
     if not 0 <= args.port <= 65535:
         parser.error("端口必须在 0–65535 之间")
     try:
+        load_local_credentials(args.config)
         state_dir = args.state_dir or args.config.resolve().parent.parent / "state"
+        if args.open and existing_panel(args.port, args.config, state_dir):
+            origin = f"http://127.0.0.1:{args.port}"
+            print(f"网页服务已在运行：{origin}，已打开现有页面。", flush=True)
+            webbrowser.open(origin)
+            return
         controller = Controller(args.config, state_dir)
         with StateStore(state_dir / "web-controller.json").lock():
             with PanelServer(args.port, controller) as server:

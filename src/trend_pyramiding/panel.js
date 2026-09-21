@@ -2,26 +2,47 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="panel-token"]').content;
 const labels = {watch:'只读观察', 'demo-watch':'模拟账户观察', demo:'模拟交易', live:'实盘交易'};
+let marketCatalog = [], catalogProfile = null, catalogLoading = false, selectionDirty = false, selectionSaving = false, selectionProfile = null;
+let chosen = new Set();
+let settingsDirty=false, settingsSaving=false, settingsProfile=null, settingsFields=[];
+const accountAttempts = {};
 let last = null, actionBusy = false, checkBusy = false, loading = false, connected = false;
 const date = value => value ? new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN', {hour12:false}) : '—';
 const num = value => value === null || value === undefined ? '—' : Number(value).toLocaleString('zh-CN', {maximumFractionDigits:6});
 async function api(path, data) {
-  const response = await fetch(path, {cache:'no-store', headers:{'X-Panel-Token':token, ...(data ? {'Content-Type':'application/json'} : {})}, ...(data ? {method:'POST', body:JSON.stringify(data)} : {})});
+  const controller = new AbortController();
+  const timeout = setTimeout(()=>controller.abort(), path === '/api/check' ? 130000 : path.includes('/api/instruments') ? 60000 : 15000);
+  try {
+  const response = await fetch(path, {signal:controller.signal, cache:'no-store', headers:{'X-Panel-Token':token, ...(data ? {'Content-Type':'application/json'} : {})}, ...(data ? {method:'POST', body:JSON.stringify(data)} : {})});
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || '请求失败');
   return result;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('请求超时，请查看当前状态后重试');
+    throw error;
+  } finally {clearTimeout(timeout);}
 }
 function message(text) { text = text.replace('missing OKX environment variables: ', '尚未配置完整的环境变量：'); $('error').textContent = text; $('error').hidden = !text; }
 function controls() {
   const mode = $('mode').value;
   const active = last?.running;
   $('mode').disabled = !!active || actionBusy || checkBusy;
-  $('start').disabled = !connected || !!active || actionBusy || checkBusy || !!last?.external_process?.length;
+  $('start').disabled = !connected || !!active || actionBusy || checkBusy || !!last?.external_process?.length || selectionDirty || selectionSaving || settingsDirty || settingsSaving;
   $('stop').disabled = !connected || !active || !!last?.stopping || actionBusy;
   $('check').disabled = !connected || checkBusy || !!last?.checking;
-  $('check').textContent = checkBusy || last?.checking ? '正在检查…' : '检查账户 ↗';
+  $('check').textContent = checkBusy || last?.checking ? '正在读取…' : '刷新账户 ↗';
+  const locked = !!last?.selection?.locked || !!last?.external_process?.length;
+  $('selection-mode').disabled = locked || selectionSaving;
+  $('save-selection').disabled = !connected || locked || !selectionDirty || selectionSaving || checkBusy || !!last?.checking || ($('selection-mode').value === 'manual' && chosen.size === 0);
+  $('save-selection').textContent = selectionSaving ? '正在保存…' : '保存币种选择';
+  document.querySelectorAll('#market-options input').forEach(input=>input.disabled = locked || selectionSaving || (!input.checked && chosen.size >= 10));
   $('start').textContent = actionBusy ? '处理中…' : mode === 'live' ? '▶ 启动实盘交易' : mode === 'demo' ? '▶ 启动模拟交易' : '▶ 启动观察';
   $('start').classList.toggle('live', mode === 'live');
+  const settingsLocked = locked || checkBusy || !!last?.checking || settingsSaving;
+  $('save-settings').disabled = !connected || settingsLocked || !settingsDirty;
+  $('save-settings').textContent = settingsSaving ? '正在保存…' : '保存参数';
+  $('reset-settings').disabled = settingsSaving || !settingsDirty;
+  document.querySelectorAll('#settings-form input,#settings-form select').forEach(input=>input.disabled=settingsLocked);
   $('stop').textContent = last?.stopping ? '正在停止…' : '■ 停止';
   $('mode-note').textContent = mode === 'live' ? '启动后会使用实盘账户下单，资金上限按策略配置执行。' : mode === 'demo' ? '使用独立模拟盘密钥，向 OKX 模拟账户发送订单。' : '持续检查账户与市场，不发送交易订单。';
 }
@@ -35,27 +56,30 @@ function render(s) {
   if (s.external_process.length) warnings.push('检测到其他终端启动的策略。本页仅能停止从当前网页启动的进程。');
   const beat = s.heartbeat;
   if (s.running && beat && Date.now()/1000 - beat.updated_at > 600) warnings.push('策略超过 10 分钟没有更新，请检查最近日志。');
-  if (s.account?.error) warnings.push('最近账户检查失败：' + s.account.error);
+  if (s.running && beat?.phase === 'recovering') warnings.push('网络或交易所暂不可用，正在自动重连。');
+  if (s.running && beat?.phase === 'degraded') warnings.push('部分币种行情暂不可用，已限制相关交易，详情见日志。');
+  if (s.account?.error) warnings.push('最近账户读取失败：' + s.account.error);
+  warnings.push(...(s.account?.data?.warnings || []));
   $('warning').textContent = warnings.join(' '); $('warning').hidden = !warnings.length;
-  const phase = s.stopping ? '正在停止' : s.running ? (s.halt ? '异常暂停' : beat?.phase === 'error' ? '检查失败' : beat?.phase === 'ready' ? labels[s.mode] + '运行中' : '正在启动') : s.external_process.length ? '外部进程运行中' : s.exit_code !== null && s.exit_code !== 0 ? '进程已退出' : '未运行';
+  const phase = s.stopping ? '正在停止' : s.running ? (s.halt ? '异常暂停' : beat?.phase === 'recovering' ? '连接恢复中' : beat?.phase === 'degraded' ? '运行中 · 部分行情暂不可用' : beat?.phase === 'error' ? '检查失败' : beat?.phase === 'ready' ? labels[s.mode] + '运行中' : '正在启动') : s.external_process.length ? '外部进程运行中' : s.exit_code !== null && s.exit_code !== 0 ? '进程已退出' : '未运行';
   $('run-badge').textContent = phase;
   $('run-badge').className = 'badge ' + (s.halt || (s.exit_code && !s.running) ? 'danger' : s.running ? '' : 'neutral');
   $('profile').textContent = s.profile === 'demo' ? '模拟账户' : '实盘账户';
-  $('keys').textContent = s.credentials[s.profile] ? '已配置 · 环境变量' : '未配置完整';
-  $('key-note').textContent = s.credentials[s.profile] ? '密钥仅从环境变量读取，不在网页中显示。' : '请设置 ' + ['API_KEY','API_SECRET','API_PASSPHRASE'].map(name => (s.profile === 'demo' ? 'OKX_DEMO_' : 'OKX_') + name).join('、') + ' 后，重新启动网页服务。';
+  $('keys').textContent = s.credentials[s.profile] ? '已配置' : '未配置完整';
+  $('key-note').textContent = s.credentials[s.profile] ? '密钥已由服务读取，无需重复输入。' : '请配置此账户的密钥后，重新启动网页服务。';
   $('started').textContent = s.started_at ? date(s.started_at) : '尚未启动';
   $('heartbeat').textContent = beat ? date(beat.updated_at) : '—';
   $('bar').textContent = s.config.bar; $('leverage').textContent = s.config.leverage + '×';
-  $('allocation').replaceChildren(document.createTextNode(Math.round(s.config.capital_fraction*100)), Object.assign(document.createElement('span'),{textContent:'%'}));
+  $('allocation').replaceChildren(document.createTextNode(Math.round(s.config.capital_fraction*10000)/100), Object.assign(document.createElement('span'),{textContent:'%'}));
   const account = s.account?.data;
   $('equity').textContent = num(account?.account_equity_usdt_equivalent);
   $('available').textContent = num(account?.available_usdt);
-  $('account-time').textContent = s.account?.time ? '检查于 ' + date(s.account.time) : '点击“检查账户”读取';
-  $('account-orders').textContent = account ? `${account.open_positions} / ${account.pending_orders}` : '—';
+  $('account-time').textContent = s.account?.time ? '更新于 ' + date(s.account.time) : s.credentials[s.profile] ? '正在读取账户…' : '尚未配置此账户';
+  $('account-orders').textContent = account ? `${account.open_positions ?? "—"} / ${account.pending_orders ?? "—"}` : '—';
   $('budget').textContent = account ? '当前权益对应上限 ' + num(account.capital_limit_usdt_approx) + ' USDT' : '保证金与手续费预留';
   $('position-count').replaceChildren(document.createTextNode(s.markets.filter(m => Number(m.contracts)>0).length), Object.assign(document.createElement('span'), {textContent:' 个币对'}));
-  $('pending').textContent = s.pending ? '有待核对订单' : '本地策略记录 · 无待核对订单';
-  const rows = s.markets.length ? s.markets : (account?.instruments || []).map(instrument=>({instrument, contracts:null, legs:null}));
+  $('pending').textContent = s.pending ? '有待核对订单' : '策略保存的记录 · 无待核对订单';
+  const rows = s.markets.length ? s.markets : (s.selection?.instruments?.length ? s.selection.instruments : (account?.instruments || [])).map(instrument=>({instrument, contracts:null, legs:null}));
   $('market-count').textContent = rows.length ? `${rows.length} 个币对${s.markets.length ? '' : ' · 只读候选'}` : `首次启动筛选前 ${s.config.top_n} 个`;
   $('market-body').replaceChildren(...rows.map(row=>{
     const tr = document.createElement('tr');
@@ -65,11 +89,15 @@ function render(s) {
   const logText = s.logs.map(line=>`[${date(line.time)}] ${line.text}`).join('\n') || '等待启动策略，运行信息会显示在这里。';
   const follow = $('logs').scrollHeight - $('logs').scrollTop - $('logs').clientHeight < 40;
   if ($('logs').textContent !== logText) { $('logs').textContent=logText; if(follow) $('logs').scrollTop=$('logs').scrollHeight; }
-  $('log-count').textContent = s.logs.length + ' 条'; controls();
+  $('log-count').textContent = s.logs.length + ' 条';
+  syncSelection(s); syncSettings(s); controls();
 }
 async function refresh() {
   if (loading) return; loading=true;
-  try { const s=await api('/api/status?mode='+encodeURIComponent($('mode').value)); connected=true; $('connection').textContent='本机已连接 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}); render(s); }
+  try { const s=await api('/api/status?mode='+encodeURIComponent($('mode').value)); connected=true; $('connection').textContent='服务已连接 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}); render(s);
+    if (s.credentials[s.profile] && !s.checking && !checkBusy && Date.now() - Math.max(accountAttempts[s.profile] || 0, (s.account?.time || 0)*1000, (s.account?.error_time || 0)*1000) > 60000) void checkAccount();
+    if (catalogProfile !== s.profile && !catalogLoading) void loadMarkets();
+  }
   catch(error) {connected=false; $('connection').textContent='连接中断 · 请检查网页服务'; message(error.message); controls();}
   finally {loading=false;}
 }
@@ -80,10 +108,112 @@ async function action(path,data) {
 }
 $('start').addEventListener('click',()=>action('/api/start',{mode:$('mode').value,confirm_live:$('mode').value==='live'}));
 $('stop').addEventListener('click',()=>action('/api/stop',{}));
-$('check').addEventListener('click',async()=>{
-  checkBusy=true; message(''); controls();
-  try {await api('/api/check',{mode:$('mode').value});} catch(error){message(error.message);}
+async function checkAccount() {
+  if (checkBusy || last?.checking) return;
+  checkBusy=true; accountAttempts[last?.profile || 'live']=Date.now(); controls();
+  try {await api('/api/check',{mode:$('mode').value});}
+  catch(error){message(error.message);}
   finally {checkBusy=false; await refresh(); controls();}
+}
+function syncSelection(s) {
+  if (selectionProfile !== s.profile) {selectionDirty=false; selectionProfile=s.profile;}
+  const saved=s.selection?.instruments || [];
+  if (!selectionDirty && !selectionSaving) {
+    chosen=new Set(saved);
+    $('selection-mode').value=saved.length ? 'manual' : 'auto';
+  }
+  $('selection-saved').textContent=saved.length ? '已保存 '+saved.map(x=>x.replace('-USDT-SWAP','')).join('、') : '已保存 · 自动前 '+s.config.top_n+' 个';
+  $('selection-mode').options[0].textContent='自动选择加密货币成交额前 '+s.config.top_n+' 个';
+  $('manual-selection').hidden=$('selection-mode').value!=='manual';
+  $('selection-note').textContent=s.selection?.locked ? '运行中或仍有持仓、待核对订单时，暂时不能更换币种。' : selectionDirty ? '选择尚未保存，保存后才能启动。' : '选择保存在服务中，刷新页面和重启后仍有效。';
+  renderMarkets();
+}
+function renderMarkets() {
+  const search=$('market-search').value.trim().toUpperCase();
+  const items=marketCatalog.filter(item=>item.instrument.includes(search));
+  // Keep search and draft selection intact across the regular status refresh.
+  const key=JSON.stringify([items.map(x=>x.instrument),[...chosen],last?.selection?.locked]);
+  if ($('market-options').dataset.renderKey !== key) {
+    $('market-options').dataset.renderKey=key;
+    $('market-options').replaceChildren(...items.map(item=>{
+      const label=document.createElement('label'); label.className='market-option';
+      const input=document.createElement('input'); input.type='checkbox'; input.value=item.instrument; input.checked=chosen.has(item.instrument);
+      input.addEventListener('change',()=>{if(input.checked)chosen.add(item.instrument);else chosen.delete(item.instrument);selectionDirty=true;$('selection-feedback').textContent='';syncSelection(last);controls();});
+      const category={'3':'股票','4':'贵金属'}[item.category];
+      label.append(input,document.createTextNode(item.instrument.replace('-USDT-SWAP',' / USDT')+(category?' · '+category:'')));return label;
+    }));
+  }
+  $('selection-count').textContent='已选 '+chosen.size+' / 10 个'+(chosen.size ? '：'+[...chosen].map(x=>x.replace('-USDT-SWAP','')).join('、') : '');
+}
+async function loadMarkets() {
+  if (catalogLoading) return; catalogLoading=true;
+  const mode=$('mode').value, profile=last?.profile;
+  $('catalog-status').textContent='正在加载交易所币种…';
+  try {
+    const data=await api('/api/instruments?mode='+encodeURIComponent(mode));
+    if (last?.profile !== profile) return;
+    marketCatalog=data.items; catalogProfile=profile;
+    $('catalog-status').textContent='可选 '+marketCatalog.length+' 个 USDT 永续合约 · 按 24 小时成交额排序';
+    renderMarkets(); controls();
+  } catch(error) {catalogProfile=profile;$('catalog-status').textContent='币种加载失败：'+error.message+'，请点击刷新币种重试。';}
+  finally {catalogLoading=false;}
+}
+$('check').addEventListener('click',()=>{message('');checkAccount();});
+$('mode').addEventListener('change',()=>{message('');selectionDirty=false;settingsDirty=false;marketCatalog=[];catalogProfile=null;selectionProfile=null;controls();refresh();});
+$('selection-mode').addEventListener('change',()=>{selectionDirty=true;$('selection-feedback').textContent='';syncSelection(last);controls();});
+$('market-search').addEventListener('input',()=>{renderMarkets();controls();});
+$('reload-markets').addEventListener('click',loadMarkets);
+$('save-selection').addEventListener('click',async()=>{
+  selectionSaving=true;message('');controls();
+  try {
+    await api('/api/selection',{mode:$('mode').value,instruments:$('selection-mode').value==='auto'?[]:[...chosen]});
+    selectionDirty=false;$('selection-feedback').textContent='币种选择已保存，下次启动按此选择运行。';
+  } catch(error){message(error.message);}
+  finally {selectionSaving=false;await refresh();controls();}
 });
-$('mode').addEventListener('change',()=>{message('');controls();refresh();});
 controls(); refresh(); setInterval(refresh,2000);
+
+function syncSettings(s) {
+  if (!s.parameters) return;
+  if(settingsProfile!==s.profile){settingsDirty=false;settingsProfile=s.profile;}
+  if(!settingsFields.length){
+    settingsFields=s.parameters.fields;
+    for(const field of settingsFields){
+      const label=document.createElement('label'); label.textContent=field.label;
+      const input=document.createElement(field.type==='select'?'select':'input');
+      input.id='setting-'+field.key; label.htmlFor=input.id;
+      if(field.type==='select'){
+        for(const value of field.choices){const option=document.createElement('option');option.value=value;option.textContent=value.replace('utc','（UTC）');input.append(option);}
+      }else{
+        input.type=field.type==='weights'?'text':field.type;
+        if(field.type==='number'){input.min=field.min;input.max=field.max;input.step=field.step;input.required=true;}
+        if(field.type==='weights'){input.placeholder='30, 30, 20, 20';input.required=true;}
+      }
+      input.addEventListener('input',()=>{settingsDirty=true;$('settings-feedback').textContent='';controls();$('settings-note').textContent='参数尚未保存，保存后才能启动。';});
+      label.append(input); $(field.section==='live'?'basic-settings':'advanced-settings').append(label);
+    }
+  }
+  if(!settingsDirty&&!settingsSaving){
+    for(const field of settingsFields){
+      const input=$('setting-'+field.key),value=s.parameters.values[field.section][field.key];
+      if(field.type==='checkbox')input.checked=value;
+      else if(field.type==='weights')input.value=value.map(x=>Number((x*100).toFixed(8))).join(', ');
+      else input.value=typeof value==='number'?Number((value*(field.scale||1)).toFixed(8)):value;
+    }
+  }
+  $('settings-saved').textContent='已保存 · '+Math.round(s.config.capital_fraction*10000)/100+'% / '+s.config.leverage+'× / '+s.config.bar;
+  $('settings-note').textContent=s.selection.locked?'运行中或仍有持仓、待核对订单时，暂时不能修改参数。':settingsDirty?'参数尚未保存，保存后才能启动。':'设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。';
+}
+$('reset-settings').addEventListener('click',()=>{settingsDirty=false;syncSettings(last);controls();$('settings-feedback').textContent='已恢复到保存的参数。';});
+$('settings-form').addEventListener('submit',async event=>{
+  event.preventDefault(); if(!$('settings-form').reportValidity())return;
+  const values={live:{},strategy:{}};
+  for(const field of settingsFields){
+    const input=$('setting-'+field.key);
+    values[field.section][field.key]=field.type==='checkbox'?input.checked:field.type==='weights'?input.value.split(/[,，]/).map(x=>Number(x.trim())/100):field.type==='number'?Number(input.value)/(field.scale||1):input.value;
+  }
+  settingsSaving=true;message('');controls();
+  try{await api('/api/settings',{mode:$('mode').value,values});settingsDirty=false;$('settings-feedback').textContent='参数已保存，下次启动生效。';}
+  catch(error){message(error.message);}
+  finally{settingsSaving=false;await refresh();controls();}
+});

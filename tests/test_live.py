@@ -29,6 +29,7 @@ class Exchange:
         self.orders = {}
         self.algos = {}
         self.position = dec(0)
+        self.leverage = 2
         self.lose_ack = False
         self.missing_stop = False
         self.cancel_entry = False
@@ -68,11 +69,11 @@ class Exchange:
                     "pos": str(self.position),
                     "mgnMode": "isolated",
                     "posSide": "net",
-                    "lever": "2",
+                    "lever": str(self.leverage),
                 }
             ]
         if path.endswith("leverage-info"):
-            return [{"lever": "2"}]
+            return [{"lever": str(self.leverage)}]
         if path.endswith("trade-fee"):
             return [{"feeGroup": [{"groupId": "1", "taker": "-0.0005"}]}]
         if path.endswith("orders-pending") or path.endswith("orders-algo-pending"):
@@ -98,6 +99,8 @@ class Exchange:
                     "ruleType": "normal",
                 }
             ]
+        if path.endswith("market/tickers"):
+            return [{"instId": MARKET, "volCcy24h": "10000", "last": "100"}]
         if path.endswith("market/ticker"):
             return [{"bidPx": "123.8", "askPx": "123.9", "ts": str(int(self.clock * 1000))}]
         if path.endswith("market/candles"):
@@ -132,7 +135,8 @@ class Exchange:
     def post(self, path, body):
         self.posts.append((path, body))
         if path.endswith("set-leverage"):
-            return [{"lever": "2"}]
+            self.leverage = int(body["lever"])
+            return [{"lever": str(self.leverage)}]
         if path.endswith("amend-algos"):
             algo = next(a for a in self.algos.values() if a["algoId"] == body["algoId"])
             algo["slTriggerPx"] = body["newSlTriggerPx"]
@@ -406,8 +410,8 @@ def test_state_lock_prevents_duplicate_processes_and_saved_state_survives(tmp_pa
 @pytest.mark.parametrize(
     "changes",
     [
-        {"leverage": 3},
-        {"capital_fraction": 0.21},
+        {"leverage": 126},
+        {"capital_fraction": 1.01},
         {"capital_fraction": float("nan")},
         {"bar": "5m"},
     ],
@@ -472,8 +476,11 @@ def test_add_respects_existing_risk_including_fees():
 
 def test_shipped_config_loads_with_boolean_strategy_fields():
     config, strategy = LiveConfig.load(Path(__file__).resolve().parents[1] / "config/okx.toml")
-    assert config.capital_fraction == 0.20
-    assert config.leverage == 2
+    import tomllib
+
+    raw = tomllib.loads((Path(__file__).resolve().parents[1] / "config/okx.toml").read_text())
+    assert config.capital_fraction == raw["capital_fraction"]
+    assert config.leverage == raw["leverage"]
     assert strategy.require_add_breakout is False
 
 
@@ -521,3 +528,220 @@ def test_shutdown_before_entry_does_not_send_new_order(runner, monkeypatch):
     monkeypatch.setattr(live, "closed_candles", candles)
     runner.step(stop_requested=lambda: stopped)
     assert not runner.client.orders
+
+
+def test_readonly_balance_is_visible_even_if_account_cannot_trade():
+    exchange = Exchange()
+    exchange.mode = "long_short_mode"
+    assert account_snapshot(exchange, for_trading=False)["available_usdt"] == 10000
+    with pytest.raises(ValueError, match="net position"):
+        account_snapshot(exchange)
+
+
+def test_zero_usdt_is_reported_as_zero_for_display_only():
+    exchange = Exchange()
+    original = exchange.get
+    exchange.get = lambda path, *a, **kw: (
+        [{"totalEq": "0", "details": []}]
+        if path.endswith("account/balance")
+        else original(path, *a, **kw)
+    )
+    report = account_snapshot(exchange, for_trading=False)
+    assert report["available_usdt"] == 0 and report["equity"] is None
+    with pytest.raises(ValueError, match="USDT collateral"):
+        account_snapshot(exchange)
+
+
+def test_account_check_keeps_balance_when_market_lookup_fails(tmp_path, monkeypatch):
+    from trend_pyramiding import okx_cli
+
+    def failed(*args):
+        raise RuntimeError("public market temporarily unavailable")
+
+    monkeypatch.setattr(okx_cli, "universe", failed)
+    report = okx_cli.check_account(Exchange(), LiveConfig(), StateStore(tmp_path / "state.json"))
+    assert report["available_usdt"] == 10000
+    assert report["warnings"] and report["instruments"] == []
+
+
+def test_market_change_only_when_flat_preserves_capital_ceiling(tmp_path):
+    from dataclasses import replace
+
+    exchange = Exchange()
+    config = LiveConfig(top_n=1)
+    store = StateStore(tmp_path / "state.json")
+    first = SwapRunner(exchange, config, BacktestConfig(), store)
+    first.initialize()
+    old = store.load()
+    old["capital_ceiling"] = 123
+    store.save(old)
+    next_config = replace(config, instruments=(MARKET,))
+    next_runner = SwapRunner(exchange, next_config, BacktestConfig(), store)
+    next_runner.initialize()
+    assert store.load()["capital_ceiling"] == 123
+    assert store.load()["configured_instruments"] == [MARKET]
+    assert list(next_runner.instruments) == [MARKET]
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "local_position",
+        "pending",
+        "exchange_position",
+        "exchange_order",
+        "account_change",
+        "other_config",
+    ],
+)
+def test_market_change_cannot_bypass_existing_exposure_or_config_guard(tmp_path, problem):
+    from dataclasses import replace
+
+    exchange = Exchange()
+    config = LiveConfig(top_n=1)
+    store = StateStore(tmp_path / "state.json")
+    SwapRunner(exchange, config, BacktestConfig(), store).initialize()
+    saved = store.load()
+    next_config = replace(config, instruments=(MARKET,))
+    original = exchange.get
+    if problem == "local_position":
+        saved["markets"][MARKET]["position"] = {"qty": "1"}
+    if problem == "pending":
+        saved["pending"] = {"order": "unknown"}
+    if problem == "exchange_position":
+        exchange.position = dec(1)
+    if problem == "exchange_order":
+        exchange.get = lambda path, *a, **kw: (
+            [{"ordId": "unknown"}] if path.endswith("orders-pending") else original(path, *a, **kw)
+        )
+    if problem == "account_change":
+        exchange.get = lambda path, *a, **kw: (
+            [{**original(path, *a, **kw)[0], "uid": "different"}]
+            if path.endswith("account/config")
+            else original(path, *a, **kw)
+        )
+    if problem == "other_config":
+        next_config = replace(next_config, capital_fraction=0.1)
+    store.save(saved)
+    before = store.path.read_bytes()
+    exchange.posts.clear()
+    with pytest.raises(ValueError):
+        SwapRunner(exchange, next_config, BacktestConfig(), store).initialize()
+    assert store.path.read_bytes() == before
+    assert exchange.posts == []
+
+
+def test_switch_to_different_market_changes_actual_runner_universe(tmp_path):
+    exchange = Exchange()
+    original = exchange.get
+    other = "ETH-USDT-SWAP"
+
+    def get(path, *args, **kwargs):
+        rows = original(path, *args, **kwargs)
+        if path.endswith("public/instruments"):
+            return rows + [{**rows[0], "instId": other, "ctValCcy": "ETH"}]
+        return rows
+
+    exchange.get = get
+    store = StateStore(tmp_path / "state.json")
+    SwapRunner(exchange, LiveConfig(instruments=(MARKET,)), BacktestConfig(), store).initialize()
+    exchange.posts.clear()
+    changed = SwapRunner(exchange, LiveConfig(instruments=(other,)), BacktestConfig(), store)
+    changed.initialize()
+    assert list(changed.instruments) == [other]
+    assert list(store.load()["markets"]) == [other]
+    assert exchange.posts[0][1]["instId"] == other
+
+
+def test_wide_spread_recovers_same_bar_without_duplicate_order(runner, monkeypatch):
+    original = runner.client.get
+    bad = True
+
+    def get(path, *args, **kwargs):
+        if bad and path.endswith("market/ticker"):
+            return [{"bidPx": "100", "askPx": "110", "ts": str(int(runner.client.clock * 1000))}]
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(runner.client, "get", get)
+    runner.step()
+    runner.step()
+    assert not runner.client.orders
+    assert runner.state["markets"][MARKET]["last_bar"] is None
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert events.count("market_deferred") == 1
+    bad = False
+    runner.step()
+    runner.step()
+    assert len(runner.client.orders) == 1
+    assert not runner.market_warnings
+
+
+def test_one_market_data_failure_does_not_block_other_market(runner, monkeypatch):
+    from dataclasses import replace
+
+    from trend_pyramiding.okx import TransientRead
+
+    broken = "SNDK-USDT-SWAP"
+    runner.instruments = {broken: replace(INSTRUMENT, inst_id=broken), **runner.instruments}
+    runner.state["markets"][broken] = {"last_bar": None, "position": None}
+    runner.fees[broken] = 0.0005
+    original = runner.client.get
+
+    def get(path, params=None, **kwargs):
+        if path.endswith("market/candles") and params["instId"] == broken:
+            raise TransientRead("transport", path)
+        return original(path, params, **kwargs)
+
+    monkeypatch.setattr(runner.client, "get", get)
+    runner.step()
+    assert len(runner.client.orders) == 1
+    assert broken in runner.market_warnings
+    assert runner.state["markets"][broken]["last_bar"] is None
+
+
+def test_unknown_held_market_valuation_blocks_entries_but_maintains_stops(runner, monkeypatch):
+    from dataclasses import replace
+
+    from trend_pyramiding.live import MarketUnavailable
+
+    submit(runner)
+    other = "CRCL-USDT-SWAP"
+    runner.instruments[other] = replace(INSTRUMENT, inst_id=other)
+    runner.state["markets"][other] = {"last_bar": None, "position": None}
+    runner.fees[other] = 0.0005
+    original = runner.quote
+    trails = []
+    monkeypatch.setattr(runner, "reconcile", lambda market: None)
+    monkeypatch.setattr(runner, "trail", lambda market, row: trails.append(market))
+
+    def quote(market):
+        if market == MARKET:
+            raise MarketUnavailable("wide spread")
+        return original(market)
+
+    monkeypatch.setattr(runner, "quote", quote)
+    runner.step()
+    assert set(trails) == {MARKET, other}
+    assert len(runner.client.orders) == 1  # Only the pre-existing position.
+    assert MARKET in runner.market_warnings
+
+
+def test_stale_same_candle_is_reported_without_new_order(runner):
+    runner.step()
+    runner.client.clock += 7200
+    runner.step()
+    assert MARKET in runner.market_warnings
+    assert len(runner.client.orders) == 1
+
+
+def test_event_rotation_does_not_modify_order_state(tmp_path):
+    store = StateStore(tmp_path / "live.json")
+    state = {"version": 1, "pending": {"order": "unchanged"}}
+    store.save(state)
+    events = store.path.with_suffix(".events.jsonl")
+    with events.open("wb") as handle:
+        handle.truncate(5 * 1024 * 1024)
+    store.event("test_rotation")
+    assert store.load() == state
+    assert json.loads(events.read_text())["event"] == "test_rotation"
+    assert events.with_name(events.name + ".1").stat().st_size == 5 * 1024 * 1024

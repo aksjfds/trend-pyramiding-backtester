@@ -50,7 +50,7 @@ comparison.json 包含：
 
 ## 安装
 
-OKX 实盘功能已提供独立命令 `pyramid-okx`，默认配置为 1H、2 倍逐仓 USDT 永续合约，总保证金及费用预留不超过本金的 20%。详见 [OKX 配置与运行说明](docs/OKX_LIVE.md)。账户只读检查与实盘启动分开，实盘需要明确点击网页的“启动实盘交易”，或执行 `pyramid-okx run --live`。
+OKX 实盘功能已提供独立命令 `pyramid-okx`，支持逐仓 USDT 永续合约，周期、杠杆和本金使用比例可在网页“资金与策略设置”中修改；总额度包含保证金和费用预留。详见 [OKX 配置与运行说明](docs/OKX_LIVE.md)。账户只读检查与实盘启动分开，实盘需要明确点击网页的“启动实盘交易”，或执行 `pyramid-okx run --live`。
 
 ```bash
 python -m venv .venv
@@ -68,16 +68,18 @@ python -m pip install -e '.[dev]'
 
 ## 本地网页控制台
 
-安装并配置好 OKX 环境变量后，在项目目录运行：
+在终端运行：
 
 ```bash
-source .venv/bin/activate
-pyramid-web --open
+cd /Users/a/code/trend-pyramiding-backtester
+.venv/bin/pyramid-web --open
 ```
 
-访问 `http://127.0.0.1:8765`。网页可启动/停止只读观察、模拟交易和实盘交易，并查看账户检查结果、策略持仓、止损和最近日志。打开网页不会自动启动策略或访问账户。密钥仍只从环境变量读取。
+自动读取本机 `config/okx.credentials.toml` 中已保存的密钥，无需再次输入。密钥文件不提交 Git；Render 仍只使用环境变量。
 
-停止会等待当前操作完成，保留已有仓位和交易所止损；关闭浏览器标签不会停止策略，退出网页服务会请求停止策略。详见 [网页使用说明](docs/WEB.md)。
+网页地址为 `http://127.0.0.1:8765`。打开后自动只读加载交易账户余额，每分钟刷新，也可手动刷新。可搜索、勾选并保存交易币种，选择在刷新和重启后保留。打开网页不会自动启动交易。
+
+终端保持运行，Ctrl-C 正常退出。网页支持启动、停止和查看；停止会等待当前操作完成，保留已有仓位和交易所止损。详见 [网页使用说明](docs/WEB.md)。
 
 ## 输入数据
 
@@ -113,12 +115,6 @@ pyramid-backtest backtest \
 ```
 
 如果不传 --signal-column，项目使用 EMA20 + 前 20 根高点突破作为默认演示入场信号。
-
-## 固定参数策略候选
-
-回测命令可添加 `--strategy confirmed-pyramid`，在相同数值参数下使用收盘确认、受保护后加仓和有限风险复用。默认 `classic` 及现有实盘策略保持原样。
-
-在指定 HYPE 1H 历史区间中，总收益从 20.71% 提高到 22.13%，最大回撤绝对值从 5.35% 降至 5.10%。完整条件、分段结果及复现步骤见 [策略研究说明](docs/STRATEGY_RESEARCH.md)。这些是经过迭代筛选的历史结果，不能视为独立样本外表现。
 
 ## GitHub Actions / Release
 
@@ -168,3 +164,9 @@ break_even_r = 1.0
 当前版本是 bar-based 回测，因此同一根 K 线内部无法知道 high/low 的真实发生顺序。实现采用保守原则：已有止损优先于新增加仓；信号只在收盘后生成，下一根 K 线开盘成交。
 
 benchmarks/baseline.json 仅用于 CI regression gate，它不是交易基准。交易基准是每次运行时动态计算的 Buy & Hold。
+
+## Render 部署
+
+仓库包含 `render.yaml`。在 Render 创建 Blueprint，填写三个 OKX 环境变量即可部署带密码保护的网页控制台；网页密码由 Render 自动生成。使用付费单实例和持久化磁盘保存交易状态，重启后手动启动策略。详细步骤见 [Render 部署说明](docs/RENDER.md)。
+
+长期运行和故障恢复说明：[本地与云端运行维护](docs/RELIABILITY.md)。

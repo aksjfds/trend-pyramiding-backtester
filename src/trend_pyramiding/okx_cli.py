@@ -3,23 +3,37 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 
-from .live import LiveConfig, StateStore, SwapRunner, account_snapshot
-from .okx import Credentials, OKXClient, OKXError, UncertainWrite, dec, universe
+from .live import LiveConfig, StateStore, SwapRunner, account_snapshot, selected_config
+from .okx import Credentials, OKXClient, OKXError, TransientRead, UncertainWrite, dec, universe
 from .runtime import ProcessControl
+from .settings import load_settings
 
 
 def check_account(client, config, store):
-    account = account_snapshot(client)
-    state = store.load()
-    requested = tuple(state["markets"]) if state else config.instruments
-    instruments = universe(client, config.top_n, requested)
-    positions = [
-        p for p in client.get("/api/v5/account/positions") if dec(p.get("pos") or "0") != 0
-    ]
-    pending = client.get("/api/v5/trade/orders-pending")
+    account = account_snapshot(client, for_trading=False)
+    warnings = list(account.get("warnings", []))
+    instruments, positions, pending = [], None, None
+    try:
+        state = store.load()
+        requested = config.instruments or (tuple(state["markets"]) if state else ())
+        instruments = [i.inst_id for i in universe(client, config.top_n, requested)]
+    except (ValueError, RuntimeError, OSError) as exc:
+        warnings.append(f"候选币种读取失败：{exc}")
+        state = None
+    try:
+        positions = sum(
+            dec(p.get("pos") or "0") != 0 for p in client.get("/api/v5/account/positions")
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        warnings.append(f"持仓读取失败：{exc}")
+    try:
+        pending = len(client.get("/api/v5/trade/orders-pending"))
+    except (ValueError, RuntimeError, OSError) as exc:
+        warnings.append(f"挂单读取失败：{exc}")
     return {
         "environment": "demo" if config.demo else "live",
         "authenticated": True,
@@ -28,13 +42,16 @@ def check_account(client, config, store):
         "account_equity_usd": account["equity_usd"],
         "account_equity_usdt_equivalent": account["equity"],
         "available_usdt": account["available_usdt"],
-        "capital_limit_usdt_approx": account["equity"] * config.capital_fraction,
-        "open_positions": len(positions),
-        "pending_orders": len(pending),
+        "capital_limit_usdt_approx": account["equity"] * config.capital_fraction
+        if account["equity"] is not None
+        else None,
+        "open_positions": positions,
+        "pending_orders": pending,
         "saved_state": state is not None,
         "unresolved_order": bool(state and state["pending"]),
         "halted": store.halt_path.exists(),
-        "instruments": [i.inst_id for i in instruments],
+        "instruments": instruments,
+        "warnings": warnings,
     }
 
 
@@ -91,18 +108,61 @@ def run_worker(client, config, strategy, store, *, once=False):
             # Check again after acquiring the shared-volume lock.
             if store.halt_path.exists():
                 raise RuntimeError("persistent halt marker prevents startup")
+            # Re-read under the trading lock so a simultaneous settings save cannot be missed.
+            config, strategy = load_settings(config, strategy, store)
+            config = selected_config(config, store)
             runner = SwapRunner(client, config, strategy, store)
             try:
-                runner.initialize()
+                runner.stop_requested = control.stop.is_set
+                initialized, failures = False, 0
+                next_sync = time.monotonic() + 300
                 while not control.stop.is_set():
-                    runner.step(stop_requested=control.stop.is_set)
-                    control.update("ready")
+                    try:
+                        if not initialized:
+                            runner.initialize()
+                            initialized = True
+                        if control.stop.is_set():
+                            break
+                        if time.monotonic() >= next_sync:
+                            client.sync_time()
+                            next_sync = time.monotonic() + 300
+                        runner.step(stop_requested=control.stop.is_set)
+                    except TransientRead as exc:
+                        state = getattr(runner, "state", None) or {}
+                        unsafe = state.get("pending") or any(
+                            m.get("position", {}).get("unsafe")
+                            for m in state.get("markets", {}).values()
+                            if m.get("position")
+                        )
+                        # Never replay initialization writes or bypass order/stop verification.
+                        if unsafe or (not initialized and getattr(client, "write_attempts", 0)):
+                            raise RuntimeError(
+                                "read failed during order/setup verification; inspect before restart"
+                            ) from exc
+                        if once:
+                            raise
+                        failures += 1
+                        delay = min(60, config.poll_seconds * 2 ** min(failures - 1, 3))
+                        control.update("recovering")
+                        if failures == 1 or failures % 10 == 0:
+                            store.event("read_retry", code=exc.code, retry_seconds=delay)
+                        control.stop.wait(delay)
+                        continue
+                    if failures:
+                        store.event("connection_recovered")
+                    failures = 0
+                    control.update(
+                        "degraded" if getattr(runner, "market_warnings", {}) else "ready"
+                    )
                     if once:
                         break
                     control.stop.wait(config.poll_seconds)
                 store.event(
                     "stopped", note="exchange stops remain active; positions are not liquidated"
                 )
+            except TransientRead:
+                # A one-shot temporary read failure does not latch an operational halt.
+                raise
             except Exception as exc:
                 store.halt(exc)
                 store.event("halted", error_type=type(exc).__name__, detail=str(exc))
@@ -135,6 +195,8 @@ def main():
         root = args.config.resolve().parent.parent
         environment = "demo" if config.demo else "live"
         store = StateStore((args.state_dir or root / "state") / f"okx-{environment}.json")
+        config, strategy = load_settings(config, strategy, store)
+        config = selected_config(config, store)
         if args.command == "status":
             state = store.load()
             if state is None:
@@ -182,7 +244,8 @@ def main():
         if args.command == "watch":
             watch_account(client, config, store)
             return
-        client.sync_time()
+        if args.command != "run":
+            client.sync_time()
         if args.command == "scan":
             instruments = universe(client, config.top_n, config.instruments)
             print(
@@ -204,7 +267,7 @@ def main():
             print(json.dumps(check_account(client, config, store), indent=2))
             return
         run_worker(client, config, strategy, store, once=args.once)
-    except (ValueError, RuntimeError, OKXError, UncertainWrite, OSError) as exc:
+    except (ValueError, RuntimeError, OKXError, TransientRead, UncertainWrite, OSError) as exc:
         parser.exit(1, f"Error: {exc}\n")
 
 

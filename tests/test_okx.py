@@ -147,7 +147,7 @@ def test_contract_conversion_and_rounding():
     with pytest.raises(ValueError):
         Instrument.parse(instrument_row(ctValCcy="USD"))
     with pytest.raises(ValueError):
-        Instrument.parse(instrument_row("SNDK", instCategory="3"))
+        Instrument.parse(instrument_row("EUR", instCategory="5"))
     with pytest.raises(ValueError):
         Instrument.parse(instrument_row(ruleType="pre_market"))
 
@@ -176,3 +176,94 @@ def test_live_public_request_omits_demo_and_secret_headers():
     headers = {k.lower(): v for k, v in opener.requests[0].header_items()}
     assert "x-simulated-trading" not in headers
     assert "ok-access-key" not in headers
+
+
+@pytest.mark.parametrize(
+    "name,category,value,lot",
+    [
+        ("XAU", "4", "0.001", "1"),
+        ("SNDK", "3", "1", "0.001"),
+        ("CRCL", "3", "1", "0.1"),
+    ],
+)
+def test_stock_and_metal_contracts_preserve_size_and_fee_group(name, category, value, lot):
+    contract = Instrument.parse(
+        instrument_row(name, instCategory=category, ctVal=value, lotSz=lot, minSz=lot, groupId="4")
+    )
+    assert contract.inst_id == name + "-USDT-SWAP"
+    assert contract.category == category
+    assert contract.contract_value == Decimal(value)
+    assert contract.minimum == Decimal(lot)
+    assert contract.fee_group == "4"
+
+
+def test_tradfi_is_selectable_manually_without_changing_automatic_crypto_universe():
+    class Market:
+        def get(self, path, params=None, **kwargs):
+            if path.endswith("instruments"):
+                return [
+                    instrument_row("BTC"),
+                    instrument_row("XAU", instCategory="4"),
+                    instrument_row("CRCL", instCategory="3"),
+                ]
+            return [
+                {"instId": name + "-USDT-SWAP", "volCcy24h": vol, "last": "1"}
+                for name, vol in [("BTC", "100"), ("XAU", "99999"), ("CRCL", "999999")]
+            ]
+
+    assert universe(Market(), 1)[0].inst_id == "BTC-USDT-SWAP"
+    selected = universe(Market(), 5, ("XAU-USDT-SWAP", "CRCL-USDT-SWAP"))
+    assert [i.inst_id for i in selected] == ["XAU-USDT-SWAP", "CRCL-USDT-SWAP"]
+
+
+@pytest.mark.parametrize("code", ["50011", "50013", "50040"])
+def test_read_rate_limits_are_transient_but_writes_are_never_retried(code, monkeypatch):
+    from trend_pyramiding.okx import TransientRead
+
+    monkeypatch.setattr("trend_pyramiding.okx.time.sleep", lambda _: None)
+    opener = Opener({"code": code, "data": []})
+    client = OKXClient(
+        opener=opener, credentials=Credentials("key", "secret", "pass"), write_enabled=True
+    )
+    with pytest.raises(TransientRead):
+        client.get("/api/v5/account/balance")
+    assert len(opener.requests) == 3
+    with pytest.raises((OKXError, UncertainWrite)):
+        client.post("/api/v5/trade/order", {})
+    assert len(opener.requests) == 4
+    assert client.write_attempts == 1
+
+
+@pytest.mark.parametrize("status,expected_attempts", [(429, 3), (503, 3), (401, 1), (403, 1)])
+def test_http_read_failure_classification(status, expected_attempts, monkeypatch):
+    from trend_pyramiding.okx import TransientRead
+
+    monkeypatch.setattr("trend_pyramiding.okx.time.sleep", lambda _: None)
+    opener = Opener(error=urllib.error.HTTPError("https://openapi.okx.com", status, "", {}, None))
+    client = OKXClient(opener=opener)
+    with pytest.raises(OKXError) as error:
+        client.get("/api/v5/public/time", private=False)
+    assert isinstance(error.value, TransientRead) == (expected_attempts == 3)
+    assert len(opener.requests) == expected_attempts
+
+
+def test_expired_read_timestamp_resyncs_but_does_not_replay_a_write():
+    import time
+
+    class ClockOpener(Opener):
+        def open(self, request, timeout):
+            self.requests.append(request)
+            if request.full_url.endswith("/public/time"):
+                result = {"code": "0", "data": [{"ts": str(int(time.time() * 1000))}]}
+            elif len(self.requests) == 1:
+                result = {"code": "50102", "data": []}
+            else:
+                result = {"code": "0", "data": []}
+            return io.BytesIO(json.dumps(result).encode())
+
+    opener = ClockOpener()
+    client = OKXClient(opener=opener, credentials=Credentials("key", "secret", "pass"))
+    assert client.get("/api/v5/account/balance") == []
+    assert len(opener.requests) == 3
+    assert opener.requests[1].full_url.endswith("/public/time")
+    assert client.write_attempts == 0

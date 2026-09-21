@@ -19,12 +19,26 @@ class ProcessControl:
     def __init__(self):
         self.stop = threading.Event()
         self.handlers = {}
+        self.parent_watch = None
 
     def __enter__(self):
         for signum in (signal.SIGINT, signal.SIGTERM):
             self.handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, self.request_stop)
         self.update("starting")
+        parent = os.environ.get("PYRAMID_PARENT_PID")
+        if parent:
+            expected = int(parent)
+
+            def watch_parent():
+                while not self.stop.is_set():
+                    if os.getppid() != expected:
+                        self.stop.set()
+                        break
+                    self.stop.wait(1)
+
+            self.parent_watch = threading.Thread(target=watch_parent, daemon=True)
+            self.parent_watch.start()
         return self
 
     def request_stop(self, signum, frame):
@@ -43,6 +57,9 @@ class ProcessControl:
             Path(name).unlink(missing_ok=True)
 
     def __exit__(self, *exc):
+        self.stop.set()
+        if self.parent_watch:
+            self.parent_watch.join(timeout=2)
         try:
             self.update("stopped")
         finally:

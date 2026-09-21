@@ -104,6 +104,7 @@ def test_account_check_is_read_only_and_preserves_timestamp_on_error(controller,
         "pending_orders": 0,
         "instruments": ["BTC-USDT-SWAP"],
         "trade_permission": True,
+        "warnings": [],
     }
 
     def run(command, **kwargs):
@@ -262,3 +263,113 @@ def test_web_session_lock_prevents_second_controller(tmp_path):
         with pytest.raises(RuntimeError, match="another runner"):
             with StateStore(store.path).lock():
                 pass
+
+
+def test_coin_selection_survives_restart_and_is_used_by_runner_config(controller, monkeypatch):
+    from trend_pyramiding.live import selected_config
+
+    monkeypatch.setattr(controller, "catalog", lambda mode: [{"instrument": "HYPE-USDT-SWAP"}])
+    controller.save_selection("watch", ["HYPE-USDT-SWAP"])
+    reopened = web.Controller(controller.config_path, controller.state_dir)
+    assert reopened.snapshot()["selection"]["instruments"] == ["HYPE-USDT-SWAP"]
+    assert selected_config(reopened.config, reopened.store(False)).instruments == (
+        "HYPE-USDT-SWAP",
+    )
+    assert reopened.snapshot("demo")["selection"]["instruments"] == []
+    reopened.save_selection("watch", [])
+    assert selected_config(reopened.config, reopened.store(False)).instruments == ()
+
+
+def test_coin_selection_rejects_unknown_duplicate_or_unsafe_changes(controller, monkeypatch):
+    monkeypatch.setattr(controller, "catalog", lambda mode: [{"instrument": "BTC-USDT-SWAP"}])
+    for selection in (None, "BTC", [1], ["FAKE-USDT-SWAP"], ["BTC-USDT-SWAP"] * 2):
+        with pytest.raises(ValueError):
+            controller.save_selection("watch", selection)
+    controller.store(False).save(
+        {"version": 1, "pending": None, "markets": {"BTC-USDT-SWAP": {"position": {"qty": "1"}}}}
+    )
+    with pytest.raises(ValueError, match="持仓"):
+        controller.save_selection("watch", [])
+    controller.store(False).save({"version": 1, "pending": {"order": "unknown"}, "markets": {}})
+    with pytest.raises(ValueError, match="待核对"):
+        controller.save_selection("watch", [])
+
+
+def test_selection_http_end_to_end(server, monkeypatch):
+    monkeypatch.setattr(
+        server.controller,
+        "catalog",
+        lambda mode: [{"instrument": "BTC-USDT-SWAP", "turnover": 100}],
+    )
+    headers = {"X-Panel-Token": server.token}
+    status, _, body = request(server, "GET", "/api/instruments", **headers)
+    assert status == 200 and json.loads(body)["items"][0]["instrument"] == "BTC-USDT-SWAP"
+    assert (
+        request(
+            server,
+            "POST",
+            "/api/selection",
+            {"mode": "watch", "instruments": ["BTC-USDT-SWAP"]},
+            **headers,
+        )[0]
+        == 200
+    )
+    assert server.controller.snapshot()["selection"]["instruments"] == ["BTC-USDT-SWAP"]
+    assert server.controller.process is None
+
+
+def test_open_command_reuses_only_matching_panel(server, tmp_path):
+    assert web.existing_panel(
+        server.server_port, server.controller.config_path, server.controller.state_dir
+    )
+    assert not web.existing_panel(
+        server.server_port, server.controller.config_path, tmp_path / "different-state"
+    )
+
+
+def test_catalog_concurrency_does_not_block_health_workers(controller):
+    with controller.catalog_lock:
+        with pytest.raises(ValueError, match="正在刷新"):
+            controller.catalog()
+
+
+def test_invalid_selection_remains_visible_and_prevents_selection(controller):
+    controller.store(False).path.with_suffix(".selection.json").write_text("invalid json")
+    report = controller.snapshot()
+    assert report["state_error"]
+    assert report["selection"]["locked"]
+    assert report["running"] is False
+
+
+def test_settings_http_save_refresh_and_separate_profile(server):
+    headers = {"X-Panel-Token": server.token, "Origin": server.origin}
+    values = {
+        "live": {"capital_fraction": 0.35, "leverage": 5, "bar": "4H"},
+        "strategy": {"atr_period": 21},
+    }
+    status, _, _ = request(
+        server, "POST", "/api/settings", {"mode": "watch", "values": values}, **headers
+    )
+    assert status == 200
+    state = server.controller.snapshot("watch")
+    assert state["config"]["capital_fraction"] == 0.35
+    assert state["config"]["leverage"] == 5 and state["config"]["bar"] == "4H"
+    assert state["parameters"]["values"]["strategy"]["atr_period"] == 21
+    reopened = web.Controller(server.controller.config_path, server.controller.state_dir)
+    assert reopened.snapshot("watch")["parameters"] == state["parameters"]
+    assert reopened.snapshot("demo-watch")["config"]["bar"] == "1H"
+    assert request(server, "POST", "/api/settings", {"mode": "watch", "values": values})[0] == 403
+
+
+def test_parameters_cannot_change_while_worker_or_external_process_runs(controller, monkeypatch):
+    from types import SimpleNamespace
+
+    payload = {"live": {"capital_fraction": 0.3}, "strategy": {}}
+    controller.process = SimpleNamespace(poll=lambda: None)
+    with pytest.raises(ValueError, match="停止策略"):
+        controller.save_parameters("watch", payload)
+    controller.process = None
+    with controller.store(False).lock():
+        with pytest.raises(ValueError, match="另一个"):
+            controller.save_parameters("watch", payload)
+    assert not controller.store(False).path.with_suffix(".settings.json").exists()

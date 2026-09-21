@@ -14,6 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cloud = ["waitress>=3.0.2,<4"]
 dev = [
   "pytest>=8,<10",
   "ruff>=0.12,<1",
@@ -23,6 +24,7 @@ dev = [
 pyramid-backtest = "trend_pyramiding.cli:main"
 pyramid-okx = "trend_pyramiding.okx_cli:main"
 pyramid-web = "trend_pyramiding.web:main"
+pyramid-render = "trend_pyramiding.render_web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
