@@ -124,7 +124,6 @@ def fetch_all(
     if not ordered:
         raise RuntimeError("no Bybit candles returned")
 
-    first_ts = int(ordered[0][0])
     last_ts = int(ordered[-1][0])
 
     for previous, current in zip(ordered, ordered[1:]):
