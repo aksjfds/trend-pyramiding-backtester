@@ -19,6 +19,7 @@ BASE = "https://data.binance.vision/data/spot"
 CACHE = Path(".cache/zecusdt_1h")
 SYMBOL = "ZECUSDT"
 INTERVAL = "1h"
+MODEL_REVISION = "bayesian-mean-map-reset-v2"
 
 
 def fetch(url: str) -> bytes:
@@ -399,6 +400,7 @@ def main() -> None:
 
     summary = {
         "generated_by": "feature/scoredriven-bocpd",
+        "model_revision": MODEL_REVISION,
         "symbol": SYMBOL,
         "interval": INTERVAL,
         "results": results,
