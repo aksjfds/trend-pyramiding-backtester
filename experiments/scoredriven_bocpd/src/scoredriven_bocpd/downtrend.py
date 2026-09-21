@@ -30,7 +30,8 @@ class DowntrendConfig:
     min_previous_run_length: int = 12
     bearish_threshold: float = 0.65
     min_direction_shift: float = 0.10
-    require_bullish_previous_regime: bool = False
+    min_previous_nonbearish_probability: float = 0.20
+    require_recent_price_negative: bool = True
     direction_gain: float = 2.5
     scaler_alpha: float = 0.025
     scaler_clip: float = 8.0
@@ -47,6 +48,10 @@ class DowntrendConfig:
             raise ValueError("min_previous_run_length must be >= 1")
         if self.min_direction_shift < 0.0:
             raise ValueError("min_direction_shift must be >= 0")
+        if not 0.0 <= self.min_previous_nonbearish_probability <= 1.0:
+            raise ValueError(
+                "min_previous_nonbearish_probability must be in [0, 1]"
+            )
         if self.direction_gain <= 0.0:
             raise ValueError("direction_gain must be > 0")
         if self.min_observations < 1:
@@ -64,6 +69,8 @@ class DowntrendSignal:
     direction_shift: float
     map_reset: bool
     directional_reversal: bool
+    previous_price_nonbearish_probability: float
+    recent_price_direction: float
     standardized_features: FloatArray
     bocpd: BOCPDUpdate
 
@@ -98,6 +105,11 @@ class DowntrendDetector:
                 "provide direction_weights"
             )
         self._weight_norm = float(np.sum(np.abs(self._weights)))
+        self._price_index = (
+            self.feature_names.index("log_return")
+            if "log_return" in self.feature_names
+            else None
+        )
         self._scaler = EWMStandardizer(
             len(self.feature_names),
             alpha=self.config.scaler_alpha,
@@ -161,13 +173,36 @@ class DowntrendDetector:
             and update.map_run_length <= self.config.max_recent_run_length
         )
         direction_shift = previous_direction - recent_direction
+
+        if self._price_index is None:
+            previous_price_nonbearish_probability = 1.0
+            recent_price_direction = 0.0
+            price_context_ok = True
+        else:
+            price_idx = self._price_index
+            previous_price_mean = float(update.previous_regime_mean[price_idx])
+            previous_price_std = max(
+                float(update.previous_regime_mean_std[price_idx]),
+                np.finfo(float).tiny,
+            )
+            previous_price_z = previous_price_mean / previous_price_std
+            previous_price_nonbearish_probability = 0.5 * (
+                1.0 + math.erf(previous_price_z / math.sqrt(2.0))
+            )
+            recent_price_direction = float(update.recent_regime_mean[price_idx])
+            price_context_ok = (
+                previous_price_nonbearish_probability
+                >= self.config.min_previous_nonbearish_probability
+                and (
+                    not self.config.require_recent_price_negative
+                    or recent_price_direction < 0.0
+                )
+            )
+
         directional_reversal = (
             recent_direction < 0.0
             and direction_shift >= self.config.min_direction_shift
-            and (
-                not self.config.require_bullish_previous_regime
-                or previous_direction > 0.0
-            )
+            and price_context_ok
         )
         change_detected = (
             self._count >= self.config.min_observations
@@ -190,6 +225,10 @@ class DowntrendDetector:
             direction_shift=direction_shift,
             map_reset=map_reset,
             directional_reversal=directional_reversal,
+            previous_price_nonbearish_probability=(
+                previous_price_nonbearish_probability
+            ),
+            recent_price_direction=recent_price_direction,
             standardized_features=standardized.copy(),
             bocpd=update,
         )
