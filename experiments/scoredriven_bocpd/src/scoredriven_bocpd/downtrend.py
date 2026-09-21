@@ -75,7 +75,7 @@ class DowntrendDetector:
         config: DowntrendConfig | None = None,
         direction_weights: Mapping[str, float] | None = None,
     ) -> None:
-        if not feature_names:
+        if len(feature_names) == 0:
             raise ValueError("feature_names cannot be empty")
 
         self.feature_names = tuple(feature_names)
