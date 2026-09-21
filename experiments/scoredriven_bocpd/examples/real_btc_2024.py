@@ -110,18 +110,23 @@ def prepare_features(data: pd.DataFrame) -> pd.DataFrame:
     # Kline taker-buy base volume is a genuine executed-flow field from Binance.
     feature_input = pd.DataFrame(
         {
-            "close": data["close"].astype(float),
-            "high": data["high"].astype(float),
-            "low": data["low"].astype(float),
-            "volume": data["volume"].astype(float),
-            "buy_volume": data["taker_buy_base"].astype(float),
+            "close": data["close"].astype(float).to_numpy(),
+            "high": data["high"].astype(float).to_numpy(),
+            "low": data["low"].astype(float).to_numpy(),
+            "volume": data["volume"].astype(float).to_numpy(),
+            "buy_volume": data["taker_buy_base"].astype(float).to_numpy(),
             "sell_volume": (
                 data["volume"].astype(float) - data["taker_buy_base"].astype(float)
-            ).clip(lower=0.0),
+            ).clip(lower=0.0).to_numpy(),
         },
         index=pd.DatetimeIndex(data["timestamp"]),
     )
-    return MarketFeatureBuilder().build(feature_input)
+    features = MarketFeatureBuilder().build(feature_input)
+    if float(features["log_return"].std()) <= 1e-12:
+        raise RuntimeError("feature pipeline produced near-zero log_return variance")
+    if "trade_flow_imbalance" in features and float(features["trade_flow_imbalance"].std()) <= 1e-12:
+        raise RuntimeError("feature pipeline produced near-zero trade_flow_imbalance variance")
+    return features
 
 
 def forward_metrics(data: pd.DataFrame, i: int) -> dict[str, float]:
