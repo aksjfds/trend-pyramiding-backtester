@@ -135,16 +135,21 @@ def prepare_features(data: pd.DataFrame) -> pd.DataFrame:
     taker_buy = data["taker_buy_base"].astype(float)
     feature_input = pd.DataFrame(
         {
-            "close": data["close"].astype(float),
-            "high": data["high"].astype(float),
-            "low": data["low"].astype(float),
-            "volume": total_volume,
-            "buy_volume": taker_buy,
-            "sell_volume": (total_volume - taker_buy).clip(lower=0.0),
+            "close": data["close"].astype(float).to_numpy(),
+            "high": data["high"].astype(float).to_numpy(),
+            "low": data["low"].astype(float).to_numpy(),
+            "volume": total_volume.to_numpy(),
+            "buy_volume": taker_buy.to_numpy(),
+            "sell_volume": (total_volume - taker_buy).clip(lower=0.0).to_numpy(),
         },
         index=pd.DatetimeIndex(data["timestamp"]),
     )
-    return MarketFeatureBuilder().build(feature_input)
+    features = MarketFeatureBuilder().build(feature_input)
+    if float(features["log_return"].std()) <= 1e-12:
+        raise RuntimeError("feature pipeline produced near-zero log_return variance")
+    if "trade_flow_imbalance" in features and float(features["trade_flow_imbalance"].std()) <= 1e-12:
+        raise RuntimeError("feature pipeline produced near-zero trade_flow_imbalance variance")
+    return features
 
 
 def forward_metrics(data: pd.DataFrame, i: int) -> dict[str, float]:
