@@ -1,0 +1,51 @@
+name: ZEC 2025-2026 Real Test Release
+
+on:
+  push:
+    branches:
+      - feature/scoredriven-bocpd
+    paths:
+      - "experiments/scoredriven_bocpd/examples/real_zec_2025_2026.py"
+      - ".github/workflows/zec_realtest_release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  zec-realtest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: experiments/scoredriven_bocpd
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: experiments/scoredriven_bocpd/pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[test]"
+
+      - name: Unit tests
+        run: pytest
+
+      - name: Run ZECUSDT 2025 and 2026 evaluation
+        run: python examples/real_zec_2025_2026.py
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zecusdt-2025-2026-bocpd-results
+          path: experiments/scoredriven_bocpd/zec_realtest_results/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="zec-bocpd-realtest-${GITHUB_SHA::7}"
+          gh release create "$TAG"             --repo "$GITHUB_REPOSITORY"             --target "$GITHUB_SHA"             --title "ZECUSDT BOCPD Real-Data Test — 2025 & 2026 YTD"             --notes-file zec_realtest_results/zec_2025_2026_summary.md             zec_realtest_results/zec_2025_result.json             zec_realtest_results/zec_2026_result.json             zec_realtest_results/zec_2025_2026_summary.json             zec_realtest_results/zec_2025_2026_summary.md
