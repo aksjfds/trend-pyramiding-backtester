@@ -86,6 +86,7 @@ class BOCPDUpdate:
     regime_mean: FloatArray
     recent_regime_mean: FloatArray
     previous_regime_mean: FloatArray
+    previous_regime_mean_std: FloatArray
     regime_mean_std: FloatArray
     regime_scale: FloatArray
     ar_coefficient: FloatArray
@@ -245,6 +246,9 @@ class MultivariateScoreDrivenBOCPD:
         previous_posterior = np.exp(self._log_posterior)
         previous_map = int(np.argmax(previous_posterior))
         previous_regime_mean = self._states[previous_map].mean.copy()
+        previous_regime_mean_std = np.sqrt(
+            1.0 / self._states[previous_map].mean_precision
+        )
 
         predictive = np.array(
             [self._predictive_logpdf(state, x) for state in self._states],
@@ -326,6 +330,7 @@ class MultivariateScoreDrivenBOCPD:
             regime_mean=map_state.mean.copy(),
             recent_regime_mean=recent_mean.copy(),
             previous_regime_mean=previous_regime_mean,
+            previous_regime_mean_std=previous_regime_mean_std,
             regime_mean_std=np.sqrt(1.0 / map_state.mean_precision),
             regime_scale=np.exp(map_state.log_scale.copy()),
             ar_coefficient=self.config.phi_max
