@@ -29,7 +29,8 @@ class DowntrendConfig:
     max_recent_run_length: int = 5
     min_previous_run_length: int = 12
     bearish_threshold: float = 0.65
-    require_bullish_previous_regime: bool = True
+    min_direction_shift: float = 0.10
+    require_bullish_previous_regime: bool = False
     direction_gain: float = 2.5
     scaler_alpha: float = 0.025
     scaler_clip: float = 8.0
@@ -44,6 +45,8 @@ class DowntrendConfig:
             raise ValueError("max_recent_run_length must be >= 0")
         if self.min_previous_run_length < 1:
             raise ValueError("min_previous_run_length must be >= 1")
+        if self.min_direction_shift < 0.0:
+            raise ValueError("min_direction_shift must be >= 0")
         if self.direction_gain <= 0.0:
             raise ValueError("direction_gain must be > 0")
         if self.min_observations < 1:
@@ -157,9 +160,14 @@ class DowntrendDetector:
             update.previous_map_run_length >= self.config.min_previous_run_length
             and update.map_run_length <= self.config.max_recent_run_length
         )
+        direction_shift = previous_direction - recent_direction
         directional_reversal = (
-            not self.config.require_bullish_previous_regime
-            or (previous_direction > 0.0 and recent_direction < 0.0)
+            recent_direction < 0.0
+            and direction_shift >= self.config.min_direction_shift
+            and (
+                not self.config.require_bullish_previous_regime
+                or previous_direction > 0.0
+            )
         )
         change_detected = (
             self._count >= self.config.min_observations
@@ -179,7 +187,7 @@ class DowntrendDetector:
             triggered=triggered,
             recent_direction=recent_direction,
             previous_direction=previous_direction,
-            direction_shift=previous_direction - recent_direction,
+            direction_shift=direction_shift,
             map_reset=map_reset,
             directional_reversal=directional_reversal,
             standardized_features=standardized.copy(),
