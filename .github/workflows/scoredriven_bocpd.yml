@@ -28,3 +28,13 @@ jobs:
         run: pytest
       - name: Demo smoke test
         run: python examples/demo.py
+
+      - name: Real BTCUSDT 2024 test
+        run: python examples/real_btc_2024.py
+      - name: Upload real-data result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btcusdt-2024-bocpd-result
+          path: experiments/scoredriven_bocpd/btc_2024_result.json
+          if-no-files-found: ignore
