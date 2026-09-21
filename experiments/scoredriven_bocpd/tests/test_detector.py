@@ -153,3 +153,47 @@ def test_market_feature_builder_uses_available_microstructure_columns() -> None:
     }
     assert expected.issubset(features.columns)
     assert np.isfinite(features.to_numpy()).all()
+
+
+def test_relative_bearish_shift_does_not_require_positive_prior_direction() -> None:
+    rng = np.random.default_rng(21)
+    names = ("log_return", "order_imbalance", "trade_flow_imbalance")
+    detector = DowntrendDetector(
+        names,
+        bocpd_config=BOCPDConfig(
+            hazard_lambda=70,
+            max_run_length=160,
+            short_run_window=5,
+        ),
+        config=DowntrendConfig(
+            short_run_threshold=0.60,
+            max_recent_run_length=5,
+            min_previous_run_length=12,
+            bearish_threshold=0.60,
+            min_direction_shift=0.10,
+            require_bullish_previous_regime=False,
+            min_observations=20,
+        ),
+    )
+
+    fired = []
+    shifts = []
+    for i in range(140):
+        mean = -0.05 if i < 70 else -2.5
+        signal = detector.update(rng.normal(mean, 0.15, len(names)))
+        fired.append(signal.triggered)
+        shifts.append(signal.direction_shift)
+
+    assert max(shifts[70:85]) > 0.10
+    assert any(fired[70:85])
+
+
+def test_market_feature_builder_rejects_missing_close_values() -> None:
+    frame = pd.DataFrame(
+        {
+            "close": [100.0, np.nan, 101.0],
+            "volume": [1.0, 2.0, 3.0],
+        }
+    )
+    with np.testing.assert_raises(ValueError):
+        MarketFeatureBuilder().build(frame)
