@@ -430,3 +430,35 @@ def test_connectivity_http_endpoint(server, monkeypatch):
     assert status == 200
     assert json.loads(body) == report
     assert request(server, "GET", "/api/connectivity")[0] == 403
+
+
+def test_worker_stays_in_foreground_terminal_session(controller, monkeypatch):
+    import io
+
+    seen = {}
+
+    class FakeProcess:
+        pid = 12345
+
+        def __init__(self):
+            self.stdout = io.StringIO("")
+
+        def poll(self):
+            return None
+
+        def wait(self):
+            return 0
+
+        def send_signal(self, signal_number):
+            seen["signal"] = signal_number
+
+    def popen(*args, **kwargs):
+        seen.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(web.subprocess, "Popen", popen)
+    controller.start("watch")
+
+    assert "start_new_session" not in seen
+    assert seen["stdout"] is web.subprocess.PIPE
+    assert seen["stderr"] is web.subprocess.STDOUT
