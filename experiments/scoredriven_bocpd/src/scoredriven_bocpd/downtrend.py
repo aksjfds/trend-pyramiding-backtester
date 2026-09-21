@@ -29,6 +29,7 @@ class DowntrendConfig:
     max_recent_run_length: int = 5
     min_previous_run_length: int = 12
     bearish_threshold: float = 0.65
+    require_bullish_previous_regime: bool = True
     direction_gain: float = 2.5
     scaler_alpha: float = 0.025
     scaler_clip: float = 8.0
@@ -130,6 +131,10 @@ class DowntrendDetector:
             float(np.dot(self._weights, update.recent_regime_mean))
             / self._weight_norm
         )
+        previous_direction = (
+            float(np.dot(self._weights, update.previous_regime_mean))
+            / self._weight_norm
+        )
         instant_direction = (
             float(np.dot(self._weights, standardized))
             / self._weight_norm
@@ -146,9 +151,14 @@ class DowntrendDetector:
             update.previous_map_run_length >= self.config.min_previous_run_length
             and update.map_run_length <= self.config.max_recent_run_length
         )
+        directional_reversal = (
+            not self.config.require_bullish_previous_regime
+            or (previous_direction > 0.0 and recent_direction < 0.0)
+        )
         change_detected = (
             self._count >= self.config.min_observations
             and map_reset
+            and directional_reversal
             and update.short_run_probability >= self.config.short_run_threshold
         )
         triggered = (
