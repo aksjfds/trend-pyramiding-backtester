@@ -203,6 +203,19 @@ def request_candidate_scan(bot):
     )
 
 
+def request_manual_entry(bot, market=MARKET):
+    bot.manual_entry_store.save(
+        {
+            "version": 1,
+            "request": {
+                "id": "manual-entry-test",
+                "instrument": market,
+                "requested_at": bot.client.now(),
+            },
+        }
+    )
+
+
 def approve_first_candidate(bot):
     data = bot.candidate_store.load()
     assert data and data["candidates"]
@@ -856,3 +869,64 @@ def test_new_candle_alone_never_generates_first_entry_candidate(runner):
     runner.step()
     assert runner.candidate_store.load()["candidates"] == []
     assert not runner.client.orders
+
+
+def test_specified_instrument_can_open_without_candidate_signal(runner, monkeypatch):
+    from trend_pyramiding import live
+
+    original = live.closed_candles
+
+    def no_signal(*args, **kwargs):
+        frame = original(*args, **kwargs)
+        frame.loc[frame.index[-1], "signal"] = False
+        return frame
+
+    monkeypatch.setattr(live, "closed_candles", no_signal)
+    assert runner.candidate_store.load()["candidates"] == []
+
+    request_manual_entry(runner)
+    runner.step()
+
+    position = runner.state["markets"][MARKET]["position"]
+    assert position is not None
+    assert len(position["legs"]) == 1
+    assert position["stop"] > 0
+    assert position["distance"] > 0
+    assert runner.client.position > 0
+    assert runner.manual_entry_store.load()["request"] is None
+    assert runner.state["markets"][MARKET]["last_bar"] is not None
+
+
+def test_specified_instrument_entry_is_rejected_for_existing_position(runner):
+    submit(runner)
+    before = len(runner.client.orders)
+    request_manual_entry(runner)
+    runner.step()
+    assert len(runner.client.orders) == before
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert "manual_entry_rejected" in events
+    assert "position_already_exists" in events
+
+
+def test_manual_entry_request_is_not_replayed_after_worker_restart(tmp_path):
+    exchange = Exchange()
+    store = StateStore(tmp_path / "live.json")
+    first = SwapRunner(
+        exchange,
+        LiveConfig(instruments=(MARKET,)),
+        BacktestConfig(),
+        store,
+    )
+    first.initialize()
+    request_manual_entry(first)
+
+    restarted = SwapRunner(
+        exchange,
+        LiveConfig(instruments=(MARKET,)),
+        BacktestConfig(),
+        store,
+    )
+    restarted.initialize()
+    assert restarted.manual_entry_store.load()["request"] is None
+    restarted.step()
+    assert not exchange.orders
