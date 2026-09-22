@@ -7,6 +7,7 @@ import pytest
 
 from trend_pyramiding.engine import BacktestConfig
 from trend_pyramiding.live import (
+    CONTROL_COMMAND_TTL_SECONDS,
     LiveConfig,
     StateStore,
     SwapRunner,
@@ -198,7 +199,12 @@ def request_candidate_scan(bot):
     bot.scan_store.save(
         {
             "version": 1,
-            "request": {"id": "scan-test", "requested_at": bot.client.now()},
+            "request": {
+                "id": "scan-test",
+                "requested_at": bot.client.now(),
+                "expires_at": bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
+                "expires_at": bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
+            },
         }
     )
 
@@ -220,7 +226,21 @@ def approve_first_candidate(bot):
     data = bot.candidate_store.load()
     assert data and data["candidates"]
     candidate_id = data["candidates"][0]["id"]
-    bot.approval_store.save({"version": 1, "approvals": [candidate_id]})
+    bot.approval_store.save(
+        {
+            "version": 1,
+            "approvals": [
+                {
+                    "id": candidate_id,
+                    "requested_at": bot.client.now(),
+                    "expires_at": min(
+                        float(data["candidates"][0]["expires_at"]),
+                        bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
+                    ),
+                }
+            ],
+        }
+    )
     return candidate_id
 
 
