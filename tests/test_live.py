@@ -782,105 +782,107 @@ def test_zero_usdt_is_reported_as_zero_for_display_only():
         account_snapshot(exchange)
 
 
-def test_account_check_keeps_balance_when_market_lookup_fails(tmp_path, monkeypatch):
+def test_account_check_reports_only_strategy_managed_markets(tmp_path):
     from trend_pyramiding import okx_cli
 
-    def failed(*args):
-        raise RuntimeError("public market temporarily unavailable")
-
-    monkeypatch.setattr(okx_cli, "universe", failed)
-    report = okx_cli.check_account(Exchange(), LiveConfig(), StateStore(tmp_path / "state.json"))
-    assert report["available_usdt"] == 10000
-    assert report["warnings"] and report["instruments"] == []
-
-
-def test_market_change_only_when_flat_preserves_capital_ceiling(tmp_path):
-    from dataclasses import replace
-
     exchange = Exchange()
-    config = LiveConfig(top_n=1)
     store = StateStore(tmp_path / "state.json")
-    first = SwapRunner(exchange, config, BacktestConfig(), store)
-    first.initialize()
-    old = store.load()
-    old["capital_ceiling"] = 123
-    store.save(old)
-    next_config = replace(config, instruments=(MARKET,))
-    next_runner = SwapRunner(exchange, next_config, BacktestConfig(), store)
-    next_runner.initialize()
-    assert store.load()["capital_ceiling"] == 123
-    assert store.load()["configured_instruments"] == [MARKET]
-    assert list(next_runner.instruments) == [MARKET]
-
-
-@pytest.mark.parametrize(
-    "problem",
-    [
-        "local_position",
-        "pending",
-        "exchange_position",
-        "exchange_order",
-        "account_change",
-        "other_config",
-    ],
-)
-def test_market_change_cannot_bypass_existing_exposure_or_config_guard(tmp_path, problem):
-    from dataclasses import replace
-
-    exchange = Exchange()
-    config = LiveConfig(top_n=1)
-    store = StateStore(tmp_path / "state.json")
-    SwapRunner(exchange, config, BacktestConfig(), store).initialize()
-    saved = store.load()
-    next_config = replace(config, instruments=(MARKET,))
+    store.save(
+        {
+            "version": 1,
+            "pending": None,
+            "markets": {MARKET: {"last_bar": None, "position": None}},
+        }
+    )
     original = exchange.get
-    if problem == "local_position":
-        saved["markets"][MARKET]["position"] = {"qty": "1"}
-    if problem == "pending":
-        saved["pending"] = {"order": "unknown"}
-    if problem == "exchange_position":
-        exchange.position = dec(1)
-    if problem == "exchange_order":
-        exchange.get = lambda path, *a, **kw: (
-            [{"ordId": "unknown"}] if path.endswith("orders-pending") else original(path, *a, **kw)
-        )
-    if problem == "account_change":
-        exchange.get = lambda path, *a, **kw: (
-            [{**original(path, *a, **kw)[0], "uid": "different"}]
-            if path.endswith("account/config")
-            else original(path, *a, **kw)
-        )
-    if problem == "other_config":
-        next_config = replace(next_config, capital_fraction=0.1)
-    store.save(saved)
-    before = store.path.read_bytes()
-    exchange.posts.clear()
-    with pytest.raises(ValueError):
-        SwapRunner(exchange, next_config, BacktestConfig(), store).initialize()
-    assert store.path.read_bytes() == before
-    assert exchange.posts == []
 
-
-def test_switch_to_different_market_changes_actual_runner_universe(tmp_path):
-    exchange = Exchange()
-    original = exchange.get
-    other = "ETH-USDT-SWAP"
-
-    def get(path, *args, **kwargs):
-        rows = original(path, *args, **kwargs)
-        if path.endswith("public/instruments"):
-            return rows + [{**rows[0], "instId": other, "ctValCcy": "ETH"}]
-        return rows
+    def get(path, params=None, **kwargs):
+        if path.endswith("public/instruments") or path.endswith("market/tickers"):
+            pytest.fail("account check must not build a preselected universe")
+        return original(path, params, **kwargs)
 
     exchange.get = get
+    report = okx_cli.check_account(exchange, LiveConfig(), store)
+    assert report["available_usdt"] == 10000
+    assert report["instruments"] == [MARKET]
+
+
+def test_first_start_ignores_legacy_top_n_and_instruments(tmp_path):
+    exchange = Exchange()
     store = StateStore(tmp_path / "state.json")
-    SwapRunner(exchange, LiveConfig(instruments=(MARKET,)), BacktestConfig(), store).initialize()
-    exchange.posts.clear()
-    changed = SwapRunner(exchange, LiveConfig(instruments=(other,)), BacktestConfig(), store)
-    changed.initialize()
-    assert list(changed.instruments) == [other]
-    assert list(store.load()["markets"]) == [other]
-    assert exchange.posts[0][1]["instId"] == other
+    runner = SwapRunner(
+        exchange,
+        LiveConfig(top_n=1, instruments=(MARKET,)),
+        BacktestConfig(),
+        store,
+    )
+    runner.initialize()
+
+    assert runner.instruments == {}
+    assert store.load()["markets"] == {}
+    assert not [body for path, body in exchange.posts if path.endswith("set-leverage")]
+
+
+def test_legacy_selected_position_state_upgrades_and_resumes(tmp_path):
+    import hashlib
+    from dataclasses import asdict
+
+    exchange = Exchange()
+    store = StateStore(tmp_path / "state.json")
+    old_config = LiveConfig(top_n=1, instruments=(MARKET,))
+    strategy = BacktestConfig()
+
+    runner = SwapRunner(exchange, LiveConfig(), strategy, store)
+    runner.initialize()
+    runner._ensure_managed_market(MARKET)
+    submit(runner)
+
+    state = store.load()
+    state["configured_instruments"] = [MARKET]
+    state["configuration"] = {
+        "live": asdict(old_config),
+        "strategy": asdict(strategy),
+    }
+    state["fingerprint"] = hashlib.sha256(
+        json.dumps(
+            {
+                "live": asdict(old_config),
+                "strategy": asdict(strategy),
+                "uid": "test-account",
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    store.save(state)
+
+    restarted = SwapRunner(exchange, LiveConfig(), strategy, store)
+    restarted.initialize()
+
+    assert list(restarted.instruments) == [MARKET]
+    assert restarted.state["markets"][MARKET]["position"]["qty"] == runner.state["markets"][MARKET]["position"]["qty"]
+    assert "configured_instruments" not in restarted.state
+    restarted.reconcile(MARKET)
+
+
+def test_real_config_change_with_position_is_still_rejected(tmp_path):
+    from dataclasses import replace
+
+    exchange = Exchange()
+    store = StateStore(tmp_path / "state.json")
+    config = LiveConfig()
+    strategy = BacktestConfig()
+    runner = SwapRunner(exchange, config, strategy, store)
+    runner.initialize()
+    runner._ensure_managed_market(MARKET)
+    submit(runner)
+
+    with pytest.raises(ValueError, match="account/config differs"):
+        SwapRunner(
+            exchange,
+            replace(config, capital_fraction=0.5),
+            strategy,
+            store,
+        ).initialize()
 
 
 def test_wide_spread_recovers_same_bar_without_duplicate_order(runner, monkeypatch):
