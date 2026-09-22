@@ -9,3 +9,5 @@
 .entry-candidates{margin-top:22px}.candidate-open{border:1px solid var(--accent);background:#fff;color:var(--accent);padding:7px 12px}.candidate-open:hover:not(:disabled){background:#eef8f5}.candidate-open:disabled{opacity:.45;cursor:not-allowed}
 
 .candidate-tools{display:flex;align-items:center;gap:10px}.candidate-generate{padding:8px 12px}.candidate-generate:disabled{opacity:.45}
+
+.manual-entry-box{margin:0 0 18px;padding:14px;border:1px solid #dfe7e3;border-radius:10px;background:#fafcfb}.manual-entry-box label{display:block;font-weight:600;margin-bottom:8px}.manual-entry-row{display:flex;gap:10px;align-items:center}.manual-entry-row select{flex:1;min-width:0;padding:10px;border:1px solid #d7dedb;border-radius:8px;background:#fff;font:inherit}.manual-entry-row button{flex:none}.manual-entry-row select:disabled,.manual-entry-row button:disabled{opacity:.5}
