@@ -94,6 +94,15 @@ class Controller:
             demo, trading = self.profile(self.mode)
             if not trading:
                 raise ValueError("只读观察模式不能生成开仓候选")
+            try:
+                beat = json.loads(self.heartbeat.read_text())
+            except (OSError, ValueError, TypeError):
+                beat = {}
+            if (
+                beat.get("pid") != self.process.pid
+                or beat.get("phase") not in {"ready", "degraded"}
+            ):
+                raise ValueError("策略尚未准备好生成候选，请等待运行状态稳定")
             store = self.store(demo)
             if store.halt_path.exists():
                 raise ValueError("策略处于异常暂停状态，不能生成候选")
@@ -572,6 +581,8 @@ class Controller:
                 "candidate_scan_pending": scan_pending,
                 "candidate_scan_enabled": bool(
                     running
+                    and heartbeat
+                    and heartbeat.get("phase") in {"ready", "degraded"}
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
