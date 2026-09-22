@@ -572,6 +572,72 @@ def test_candidate_scan_only_filters_strategy_without_execution_reads(runner, mo
     assert ticker_reads == 0
 
 
+def test_candidate_scan_fetches_candles_concurrently_and_persists_once(runner, monkeypatch):
+    import threading
+    from dataclasses import replace
+
+    from trend_pyramiding import live
+
+    extras = ("ETH-USDT-SWAP", "SOL-USDT-SWAP", "XRP-USDT-SWAP")
+    original_get = runner.client.get
+
+    def get(path, params=None, **kwargs):
+        rows = original_get(path, params, **kwargs)
+        if path.endswith("public/instruments"):
+            return rows + [
+                {**rows[0], "instId": market, "ctValCcy": market.split("-")[0]}
+                for market in extras
+            ]
+        if path.endswith("market/tickers"):
+            markets = (MARKET, *extras)
+            return [
+                {"instId": market, "volCcy24h": str(10000 - index), "last": "100"}
+                for index, market in enumerate(markets)
+            ]
+        return rows
+
+    monkeypatch.setattr(runner.client, "get", get)
+    runner.instrument_catalog_complete = False
+    runner.instrument_catalog_loaded_at = 0
+
+    original_closed = live.closed_candles
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def slow_closed(*args, **kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.03)
+            return original_closed(*args, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(live, "closed_candles", slow_closed)
+
+    saves = 0
+    original_save = runner._save_candidates
+
+    def save_candidates():
+        nonlocal saves
+        saves += 1
+        original_save()
+
+    monkeypatch.setattr(runner, "_save_candidates", save_candidates)
+
+    request_candidate_scan(runner)
+    runner.step()
+
+    assert peak >= 2
+    assert saves == 2  # clear old results once, persist final results once
+    candidates = runner.candidate_store.load()["candidates"]
+    assert {item["instrument"] for item in candidates} == {MARKET, *extras}
+
+
 def test_candidate_scan_checks_all_supported_markets_and_sorts_by_volume(runner, monkeypatch):
     other = "ETH-USDT-SWAP"
     original = runner.client.get
