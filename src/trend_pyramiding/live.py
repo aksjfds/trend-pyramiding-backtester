@@ -741,7 +741,28 @@ class SwapRunner:
         try:
             scan_map = dict(self._supported_catalog())
             scan_map.update(self.instruments)
-            scan_instruments = [scan_map[key] for key in sorted(scan_map)]
+            volumes = {}
+            for row in self.client.get(
+                "/api/v5/market/tickers",
+                {"instType": "SWAP"},
+                private=False,
+            ):
+                market = row.get("instId")
+                if market not in scan_map:
+                    continue
+                try:
+                    volume = dec(row.get("volCcy24h") or "0")
+                except (ValueError, TypeError):
+                    volume = dec(0)
+                if volume.is_finite() and volume > 0:
+                    volumes[market] = volume
+            scan_instruments = sorted(
+                scan_map.values(),
+                key=lambda instrument: (
+                    -volumes.get(instrument.inst_id, dec(0)),
+                    instrument.inst_id,
+                ),
+            )
             self.store.event(
                 "candidate_scan_started",
                 request_id=request_id,
