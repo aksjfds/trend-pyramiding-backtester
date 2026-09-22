@@ -601,6 +601,8 @@ def test_candidate_scan_fetches_candles_concurrently_and_persists_once(runner, m
 
     original_closed = live.closed_candles
     lock = threading.Lock()
+    overlap = threading.Event()
+    release = threading.Event()
     active = 0
     peak = 0
 
@@ -609,10 +611,15 @@ def test_candidate_scan_fetches_candles_concurrently_and_persists_once(runner, m
         with lock:
             active += 1
             peak = max(peak, active)
+            if active >= 2:
+                overlap.set()
         try:
-            time.sleep(0.03)
+            if peak < 2:
+                overlap.wait(timeout=1)
+            release.set()
             return original_closed(*args, **kwargs)
         finally:
+            release.set()
             with lock:
                 active -= 1
 
