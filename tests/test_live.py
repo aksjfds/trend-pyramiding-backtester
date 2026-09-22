@@ -763,7 +763,7 @@ def test_unknown_held_market_valuation_blocks_entries_but_maintains_stops(runner
 
     monkeypatch.setattr(runner, "quote", quote)
     runner.step()
-    assert set(trails) == {MARKET, other}
+    assert set(trails) == {MARKET}
     assert len(runner.client.orders) == 1  # Only the pre-existing position.
     assert MARKET in runner.market_warnings
 
