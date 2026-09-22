@@ -83,7 +83,7 @@ def test_cannot_save_over_open_position_pending_order_or_halt(tmp_path, busy):
 
 def test_saved_parameters_migrate_flat_state_and_actual_leverage(tmp_path):
     store = StateStore(tmp_path / "okx-live.json")
-    config, strategy, exchange = LiveConfig(instruments=(MARKET,)), BacktestConfig(), Exchange()
+    config, strategy, exchange = LiveConfig(), BacktestConfig(), Exchange()
     bot = SwapRunner(exchange, config, strategy, store)
     bot.initialize()
     save_settings(
@@ -96,7 +96,7 @@ def test_saved_parameters_migrate_flat_state_and_actual_leverage(tmp_path):
     restarted = SwapRunner(exchange, cfg, strat, store)
     restarted.initialize()
     assert restarted.state["capital_ceiling"] == 5000
-    assert exchange.leverage == 5
+    assert restarted.instruments == {}
     assert restarted.state["fingerprint"] == config_fingerprint(cfg, strat, "test-account")
     restarted.step()
     assert not exchange.orders
@@ -104,6 +104,7 @@ def test_saved_parameters_migrate_flat_state_and_actual_leverage(tmp_path):
     restarted.step()
     approve_first_candidate(restarted)
     restarted.step()
+    assert exchange.leverage == 5
     assert len(exchange.orders) == 1
     restarted.step()
     assert len(exchange.orders) == 1
@@ -111,7 +112,7 @@ def test_saved_parameters_migrate_flat_state_and_actual_leverage(tmp_path):
 
 def test_legacy_flat_state_can_migrate_with_matching_saved_origin(tmp_path):
     store = StateStore(tmp_path / "okx-live.json")
-    config, strategy, exchange = LiveConfig(instruments=(MARKET,)), BacktestConfig(), Exchange()
+    config, strategy, exchange = LiveConfig(), BacktestConfig(), Exchange()
     bot = SwapRunner(exchange, config, strategy, store)
     bot.initialize()
     state = store.load()
@@ -126,7 +127,7 @@ def test_legacy_flat_state_can_migrate_with_matching_saved_origin(tmp_path):
 
 def test_settings_cannot_migrate_different_account(tmp_path, monkeypatch):
     store = StateStore(tmp_path / "okx-live.json")
-    config, strategy, exchange = LiveConfig(instruments=(MARKET,)), BacktestConfig(), Exchange()
+    config, strategy, exchange = LiveConfig(), BacktestConfig(), Exchange()
     bot = SwapRunner(exchange, config, strategy, store)
     bot.initialize()
     save_settings(config, strategy, store, {"live": {"leverage": 5}, "strategy": {}})
@@ -170,9 +171,10 @@ def test_daily_exit_does_not_reuse_a_signal_from_before_exit(tmp_path):
 
     exchange = Exchange()
     exchange.clock = pd.Timestamp("2026-01-06T12:30:00Z").timestamp()
-    cfg = replace(LiveConfig(instruments=(MARKET,)), bar="1Dutc")
+    cfg = replace(LiveConfig(), bar="1Dutc")
     bot = SwapRunner(exchange, cfg, BacktestConfig(), StateStore(tmp_path / "live.json"))
     bot.initialize()
+    bot._ensure_managed_market(MARKET)
     bot.state["markets"][MARKET]["position"] = {"legs": []}
     bot.cleanup_flat(MARKET)
     assert bot.state["markets"][MARKET]["last_bar"] == "2026-01-05T00:00:00+00:00"
@@ -197,7 +199,7 @@ def test_worker_trades_once_on_selected_interval(tmp_path, bar, seconds):
     exchange.get = get
     bot = SwapRunner(
         exchange,
-        LiveConfig(instruments=(MARKET,), bar=bar, leverage=5),
+        LiveConfig(bar=bar, leverage=5),
         BacktestConfig(),
         StateStore(tmp_path / "live.json"),
     )
@@ -217,7 +219,7 @@ def test_worker_trades_once_on_selected_interval(tmp_path, bar, seconds):
 
 def test_multiple_saves_before_restart_keep_original_state_baseline(tmp_path):
     store = StateStore(tmp_path / "okx-live.json")
-    config, strategy, exchange = LiveConfig(instruments=(MARKET,)), BacktestConfig(), Exchange()
+    config, strategy, exchange = LiveConfig(), BacktestConfig(), Exchange()
     bot = SwapRunner(exchange, config, strategy, store)
     bot.initialize()
     first, first_strategy = save_settings(
@@ -237,7 +239,7 @@ def test_multiple_saves_before_restart_keep_original_state_baseline(tmp_path):
 
 def test_exchange_positions_block_settings_migration_before_any_writes(tmp_path):
     store = StateStore(tmp_path / "okx-live.json")
-    config, strategy, exchange = LiveConfig(instruments=(MARKET,)), BacktestConfig(), Exchange()
+    config, strategy, exchange = LiveConfig(), BacktestConfig(), Exchange()
     SwapRunner(exchange, config, strategy, store).initialize()
     save_settings(config, strategy, store, {"live": {"leverage": 5}, "strategy": {}})
     cfg, strat = load_settings(config, strategy, store)
