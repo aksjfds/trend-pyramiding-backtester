@@ -1,4 +1,5 @@
 import json
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -201,8 +202,8 @@ def request_candidate_scan(bot):
             "version": 1,
             "request": {
                 "id": "scan-test",
-                "requested_at": bot.client.now(),
-                "expires_at": bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
+                "requested_at": time.time(),
+                "expires_at": time.time() + CONTROL_COMMAND_TTL_SECONDS,
             },
         }
     )
@@ -215,8 +216,8 @@ def request_manual_entry(bot, market=MARKET):
             "request": {
                 "id": "manual-entry-test",
                 "instrument": market,
-                "requested_at": bot.client.now(),
-                "expires_at": bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
+                "requested_at": time.time(),
+                "expires_at": time.time() + CONTROL_COMMAND_TTL_SECONDS,
             },
         }
     )
@@ -232,11 +233,8 @@ def approve_first_candidate(bot):
             "approvals": [
                 {
                     "id": candidate_id,
-                    "requested_at": bot.client.now(),
-                    "expires_at": min(
-                        float(data["candidates"][0]["expires_at"]),
-                        bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
-                    ),
+                    "requested_at": time.time(),
+                    "expires_at": time.time() + CONTROL_COMMAND_TTL_SECONDS,
                 }
             ],
         }
@@ -993,8 +991,8 @@ def test_expired_candidate_scan_command_is_discarded(runner):
             "version": 1,
             "request": {
                 "id": "expired-scan",
-                "requested_at": runner.client.now() - 60,
-                "expires_at": runner.client.now() - 1,
+                "requested_at": time.time() - 60,
+                "expires_at": time.time() - 1,
             },
         }
     )
@@ -1011,8 +1009,8 @@ def test_expired_manual_entry_command_never_opens(runner):
             "request": {
                 "id": "expired-manual",
                 "instrument": MARKET,
-                "requested_at": runner.client.now() - 60,
-                "expires_at": runner.client.now() - 1,
+                "requested_at": time.time() - 60,
+                "expires_at": time.time() - 1,
             },
         }
     )
@@ -1032,8 +1030,8 @@ def test_expired_candidate_approval_never_opens(runner):
             "approvals": [
                 {
                     "id": candidate["id"],
-                    "requested_at": runner.client.now() - 60,
-                    "expires_at": runner.client.now() - 1,
+                    "requested_at": time.time() - 60,
+                    "expires_at": time.time() - 1,
                 }
             ],
         }
