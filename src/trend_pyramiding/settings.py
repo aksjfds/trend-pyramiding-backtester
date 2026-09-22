@@ -143,53 +143,34 @@ def save_settings(config, strategy, store, payload):
 
 
 def schema():
-    def number(section, key, label, minimum, maximum, step="any", scale=1):
-        return dict(
-            section=section,
-            key=key,
-            label=label,
-            type="number",
-            min=minimum,
-            max=maximum,
-            step=step,
-            scale=scale,
-        )
-
-    fields = [
-        number("live", "capital_fraction", "资金使用上限（%）", 0.01, 100, 0.01, 100),
-        number("live", "leverage", "逐仓杠杆（倍）", 1, 125, 1),
-        dict(section="live", key="bar", label="K 线周期", type="select", choices=list(BAR_SECONDS)),
-        number("strategy", "risk_per_trade", "每个币种风险预算（%）", 0.01, 10, 0.01, 100),
-        number("strategy", "max_position_pct", "单币预算使用上限（%）", 0.01, 100, 0.01, 100),
+    """Return only the small set of settings editable from the overview cards."""
+    return [
+        {
+            "section": "live",
+            "key": "capital_fraction",
+            "label": "资金使用上限（%）",
+            "type": "number",
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01,
+            "scale": 100,
+        },
+        {
+            "section": "live",
+            "key": "leverage",
+            "label": "逐仓杠杆（倍）",
+            "type": "number",
+            "min": 1,
+            "max": 125,
+            "step": 1,
+            "scale": 1,
+        },
+        {
+            "section": "live",
+            "key": "bar",
+            "label": "K 线周期",
+            "type": "select",
+            "choices": list(BAR_SECONDS),
+        },
     ]
-    for key, label in [
-        ("atr_period", "ATR 周期"),
-        ("ema_period", "EMA 周期"),
-        ("entry_breakout_lookback", "开仓突破回看根数"),
-        ("structure_lookback", "结构止损回看根数"),
-        ("add_breakout_lookback", "加仓突破回看根数"),
-    ]:
-        fields.append(number("strategy", key, label, 1, 100, 1))
-    for key, label in [
-        ("atr_stop_mult", "初始止损 ATR 倍数"),
-        ("add_step_atr", "加仓间距 ATR 倍数"),
-        ("trail_atr_mult", "移动止损 ATR 倍数"),
-        ("trail_activation_r", "移动止损启动 R 倍数"),
-        ("break_even_r", "保本启动 R 倍数"),
-    ]:
-        fields.append(number("strategy", key, label, 0.01, 100, 0.01))
-    fields.append(number("strategy", "structure_buffer_atr", "结构止损缓冲 ATR 倍数", 0, 100, 0.01))
-    fields.append(
-        dict(
-            section="strategy",
-            key="require_add_breakout",
-            label="加仓需要再次突破",
-            type="checkbox",
-        )
-    )
-    for key, label in [
-        ("risk_weights", "各档风险比例（%，逗号分隔）"),
-        ("allocation_weights", "各档资金比例（%，逗号分隔）"),
-    ]:
-        fields.append(dict(section="strategy", key=key, label=label, type="weights", scale=100))
-    return fields
+
