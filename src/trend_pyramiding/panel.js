@@ -38,6 +38,16 @@ function controls() {
     actionBusy;
   $('generate-candidates').textContent =
     last?.candidate_scan_pending ? '生成中…' : '生成候选';
+  $('manual-entry-instrument').disabled =
+    !connected || !last?.manual_entry_enabled || !!last?.manual_entry_pending || actionBusy;
+  $('manual-entry-submit').disabled =
+    !connected ||
+    !last?.manual_entry_enabled ||
+    !!last?.manual_entry_pending ||
+    actionBusy ||
+    !$('manual-entry-instrument').value;
+  $('manual-entry-submit').textContent =
+    last?.manual_entry_pending ? '提交中…' : '开仓并交给策略接管';
   const locked = !!last?.selection?.locked || !!last?.external_process?.length;
   $('selection-mode').disabled = locked || selectionSaving;
   $('save-selection').disabled = !connected || locked || !selectionDirty || selectionSaving || checkBusy || !!last?.checking || ($('selection-mode').value === 'manual' && chosen.size === 0);
@@ -93,6 +103,7 @@ function render(s) {
     [row.instrument,num(row.contracts),num(row.average),num(row.stop),row.legs ?? '—',date(row.last_bar)].forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td);});return tr;
   }));
   $('empty-markets').hidden = rows.length > 0;
+  renderManualEntry(s);
   renderEntryCandidates(s);
   const logText = s.logs.map(line=>`[${date(line.time)}] ${line.text}`).join('\n') || '等待启动策略，运行信息会显示在这里。';
   const follow = $('logs').scrollHeight - $('logs').scrollTop - $('logs').clientHeight < 40;
@@ -100,6 +111,54 @@ function render(s) {
   $('log-count').textContent = s.logs.length + ' 条';
   syncSelection(s); syncSettings(s); controls();
 }
+function renderManualEntry(s) {
+  const select = $('manual-entry-instrument');
+  const previous = select.value;
+  const instruments = s.manual_entry_instruments || [];
+  select.replaceChildren(Object.assign(document.createElement('option'), {
+    value: '',
+    textContent: instruments.length ? '选择当前管理币种' : '暂无可手动开仓币种',
+  }));
+  instruments.forEach(instrument => {
+    const option = document.createElement('option');
+    option.value = instrument;
+    option.textContent = instrument;
+    select.append(option);
+  });
+  if (instruments.includes(previous)) select.value = previous;
+
+  if (s.manual_entry_pending) {
+    $('manual-entry-note').textContent = '手动开仓请求已提交，worker 正在重新检查行情、止损、预算和最小张数。';
+  } else if (!s.running) {
+    $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，才能对当前管理币种手动开仓。';
+  } else if (!s.manual_entry_enabled) {
+    $('manual-entry-note').textContent = '当前状态不能手动开仓，请先处理异常暂停、待核对订单或等待策略准备完成。';
+  } else {
+    $('manual-entry-note').textContent = '不要求该币进入候选列表；程序使用最新已收盘 K 线计算策略初始止损和下单张数，成交后由策略接管。';
+  }
+}
+
+async function submitManualEntry() {
+  const instrument = $('manual-entry-instrument').value;
+  if (!instrument || actionBusy || last?.manual_entry_pending) return;
+  actionBusy = true;
+  $('manual-entry-note').textContent = '正在提交 ' + instrument + ' 手动开仓请求…';
+  controls();
+  try {
+    await api('/api/manual-entry', {
+      mode: $('mode').value,
+      instrument,
+    });
+    $('manual-entry-note').textContent = instrument + ' 已提交，worker 将重新核验后执行。';
+  } catch (error) {
+    $('manual-entry-note').textContent = '手动开仓失败：' + error.message;
+  } finally {
+    actionBusy = false;
+    await refresh();
+    controls();
+  }
+}
+
 function renderEntryCandidates(s) {
   const candidates = s.entry_candidates || [];
   const now = Date.now() / 1000;
@@ -296,6 +355,8 @@ async function loadMarkets() {
 $('check').addEventListener('click',()=>{message('');checkAccount();});
 $('refresh-network').addEventListener('click',()=>refreshNetwork());
 $('generate-candidates').addEventListener('click',()=>generateCandidates());
+$('manual-entry-instrument').addEventListener('change',()=>controls());
+$('manual-entry-submit').addEventListener('click',()=>submitManualEntry());
 $('mode').addEventListener('change',()=>{message('');selectionDirty=false;settingsDirty=false;marketCatalog=[];catalogProfile=null;selectionProfile=null;controls();refresh();});
 $('selection-mode').addEventListener('change',()=>{selectionDirty=true;$('selection-feedback').textContent='';syncSelection(last);controls();});
 $('market-search').addEventListener('input',()=>{renderMarkets();controls();});
