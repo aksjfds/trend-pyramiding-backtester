@@ -120,18 +120,26 @@ class Controller:
             raise ValueError("存在待核对订单，不能提交新的交易操作")
         return demo, store, state
 
-    def request_manual_entry(self, mode, instrument):
-        if not isinstance(instrument, str) or not instrument:
-            raise ValueError("请选择有效的币种")
+    def request_manual_entry(self, mode, instrument, capital_fraction):
+        if (
+            not isinstance(instrument, str)
+            or not instrument.endswith("-USDT-SWAP")
+        ):
+            raise ValueError("请选择有效的 USDT 永续合约")
+        if (
+            isinstance(capital_fraction, bool)
+            or not isinstance(capital_fraction, (int, float))
+            or not 0 < capital_fraction <= 1
+        ):
+            raise ValueError("资金使用比例必须大于 0% 且不超过 100%")
         with self.lock:
             demo, store, state = self._require_trading_worker(mode)
-            if instrument not in state.get("markets", {}):
-                raise ValueError("该币种不在当前策略管理列表，请先停止策略并修改交易币种")
-            if state["markets"][instrument].get("position"):
+            tracked = state.get("markets", {}).get(instrument)
+            if tracked and tracked.get("position"):
                 raise ValueError("该币种已经有策略持仓")
 
             scan_data = self.candidate_scan_store(demo).load()
-            if scan_data and scan_data.get("request"):
+            if scan_data and (scan_data.get("request") or scan_data.get("active")):
                 raise ValueError("候选扫描正在进行，请等待完成")
             approval_data = self.approval_store(demo).load()
             if approval_data and approval_data.get("approvals"):
@@ -150,6 +158,7 @@ class Controller:
                             "request": {
                                 "id": secrets.token_hex(12),
                                 "instrument": instrument,
+                                "capital_fraction": float(capital_fraction),
                                 "requested_at": now,
                                 "expires_at": now + CONTROL_COMMAND_TTL_SECONDS,
                             },
@@ -172,7 +181,7 @@ class Controller:
             try:
                 with scan_store.lock():
                     data = scan_store.load() or {"version": 1, "request": None}
-                    if data.get("request"):
+                    if data.get("request") or data.get("active"):
                         raise ValueError("候选扫描已提交，请等待完成")
                     now = time.time()
                     scan_store.save(
@@ -226,7 +235,7 @@ class Controller:
             if manual_data and manual_data.get("request"):
                 raise ValueError("已有手动开仓正在处理，请等待完成")
             scan_data = self.candidate_scan_store(demo).load()
-            if scan_data and scan_data.get("request"):
+            if scan_data and (scan_data.get("request") or scan_data.get("active")):
                 raise ValueError("候选扫描正在进行，请等待完成")
             candidate = next(
                 (item for item in self.entry_candidates(demo) if item["id"] == candidate_id),
@@ -607,7 +616,9 @@ class Controller:
             try:
                 candidates = self.entry_candidates(demo)
                 scan_data = self.candidate_scan_store(demo).load()
-                scan_pending = bool(scan_data and scan_data.get("request"))
+                scan_pending = bool(
+                    scan_data and (scan_data.get("request") or scan_data.get("active"))
+                )
                 manual_data = self.manual_entry_store(demo).load()
                 manual_entry_pending = bool(manual_data and manual_data.get("request"))
                 approval_data = self.approval_store(demo).load()
@@ -838,7 +849,9 @@ class Handler(BaseHTTPRequestHandler):
                 controller.request_candidate_scan(data.get("mode", "watch"))
             elif self.path == "/api/manual-entry":
                 controller.request_manual_entry(
-                    data.get("mode", "watch"), data.get("instrument")
+                    data.get("mode", "watch"),
+                    data.get("instrument"),
+                    data.get("capital_fraction"),
                 )
             else:
                 self.send(404, {"error": "操作不存在"})
