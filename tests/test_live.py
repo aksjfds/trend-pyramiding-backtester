@@ -563,7 +563,7 @@ def test_candidate_scan_only_filters_strategy_without_execution_reads(runner, mo
     assert instrument_reads == 1
     assert fee_reads == 0
     assert ticker_reads == 0
-    assert all(set(item) == {"id", "instrument"} for item in candidates)
+    assert all(set(item) == {"id", "instrument", "volume_usdt_24h"} for item in candidates)
 
     request_candidate_scan(runner)
     runner.step()
@@ -598,7 +598,8 @@ def test_candidate_scan_checks_all_supported_markets_and_sorts_by_volume(runner,
 
     candidates = runner.candidate_store.load()["candidates"]
     assert [item["instrument"] for item in candidates] == [other, MARKET]
-    assert all(set(item) == {"id", "instrument"} for item in candidates)
+    assert [item["volume_usdt_24h"] for item in candidates] == ["2500000", "1000000"]
+    assert all(set(item) == {"id", "instrument", "volume_usdt_24h"} for item in candidates)
     assert other not in runner.state["markets"]
     scan_state = runner.scan_store.load()
     assert scan_state["request"] is None
