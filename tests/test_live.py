@@ -930,3 +930,24 @@ def test_manual_entry_request_is_not_replayed_after_worker_restart(tmp_path):
     assert restarted.manual_entry_store.load()["request"] is None
     restarted.step()
     assert not exchange.orders
+
+
+def test_specified_instrument_entry_is_taken_over_by_strategy(runner):
+    request_manual_entry(runner)
+    runner.step()
+    position = runner.state["markets"][MARKET]["position"]
+    assert position is not None
+    old_stop = position["stop"]
+
+    runner.trail(
+        MARKET,
+        pd.Series(
+            {
+                "high": position["first_entry"] + position["distance"] * 3,
+                "close": position["first_entry"] + position["distance"] * 2.5,
+                "structure_low": position["first_entry"] + position["distance"],
+                "atr": max(position["distance"] / 2, 0.1),
+            }
+        ),
+    )
+    assert runner.state["markets"][MARKET]["position"]["stop"] >= old_stop
