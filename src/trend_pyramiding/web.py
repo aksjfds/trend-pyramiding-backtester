@@ -208,12 +208,13 @@ class Controller:
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
-            if not {"id", "instrument"} <= set(candidate):
+            if not {"id", "instrument", "volume_usdt_24h"} <= set(candidate):
                 continue
             result.append(
                 {
                     "id": str(candidate["id"]),
                     "instrument": str(candidate["instrument"]),
+                    "volume_usdt_24h": str(candidate["volume_usdt_24h"]),
                 }
             )
         # Preserve the worker's 24h-volume ranking.
