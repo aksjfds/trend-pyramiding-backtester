@@ -659,13 +659,19 @@ class SwapRunner:
             if quantity == 0:
                 continue
 
+            next_bar_close = (
+                row["timestamp"].timestamp() + 2 * BAR_SECONDS[self.config.bar]
+            )
             self._publish_candidate(
                 market,
                 bar=bar,
                 close=float(row["close"]),
                 stop=stop,
                 contracts=quantity,
-                expires_at=self.client.now() + self.config.max_signal_age_seconds,
+                expires_at=min(
+                    self.client.now() + self.config.max_signal_age_seconds,
+                    next_bar_close,
+                ),
             )
             found += 1
 
