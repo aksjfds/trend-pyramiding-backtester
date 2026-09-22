@@ -604,24 +604,9 @@ class SwapRunner:
             if not info or any(dec(x["lever"]) != self.config.leverage for x in info):
                 raise ValueError("configured isolated leverage verification failed")
             self.fees[instrument.inst_id] = self._fee_rate(instrument)
-        try:
-            saved_candidates = self.candidate_store.load() or {"version": 1, "candidates": []}
-            candidates = saved_candidates.get("candidates", [])
-            if not isinstance(candidates, list):
-                raise ValueError("invalid entry candidate state")
-            now = self.client.now()
-            self.entry_candidates = {
-                item["instrument"]: item
-                for item in candidates
-                if (
-                    isinstance(item, dict)
-                    and item.get("instrument") in self.instruments
-                    and float(item.get("expires_at", 0)) > now
-                    and self.state["markets"][item["instrument"]]["position"] is None
-                )
-            }
-        except (ValueError, OSError, KeyError, TypeError):
-            self.entry_candidates = {}
+        # Candidate lists are explicit scan results, not durable trading state.
+        # A worker restart clears them so the UI never presents stale scan output.
+        self.entry_candidates = {}
         self._save_candidates()
         # Click commands are ephemeral: never replay them after a worker restart.
         self.approval_store.save({"version": 1, "approvals": []})
@@ -683,48 +668,26 @@ class SwapRunner:
             {"version": 1, "candidates": list(self.entry_candidates.values())}
         )
 
-    def _candidate_id(self, market: str, bar: str) -> str:
-        return hashlib.sha256(f"{market}|{bar}".encode()).hexdigest()[:24]
+    def _candidate_id(self, market: str) -> str:
+        return hashlib.sha256(market.encode()).hexdigest()[:24]
 
     def _remove_candidate(self, market: str):
         if self.entry_candidates.pop(market, None) is not None:
             self._save_candidates()
 
-    def _expire_candidates(self):
-        now = self.client.now()
+    def _prune_candidates(self):
         changed = False
-        for market, candidate in list(self.entry_candidates.items()):
-            if (
-                candidate["expires_at"] <= now
-                or self.state["markets"].get(market, {}).get("position") is not None
-            ):
+        for market in list(self.entry_candidates):
+            if self.state["markets"].get(market, {}).get("position") is not None:
                 self.entry_candidates.pop(market, None)
                 changed = True
         if changed:
             self._save_candidates()
 
-    def _publish_candidate(
-        self,
-        market: str,
-        *,
-        bar: str,
-        close: float,
-        stop: float,
-        contracts,
-        expires_at: float,
-    ):
-        candidate_id = self._candidate_id(market, bar)
+    def _publish_candidate(self, market: str):
+        candidate_id = self._candidate_id(market)
         existing = self.entry_candidates.get(market)
-        candidate = {
-            "id": candidate_id,
-            "instrument": market,
-            "bar": bar,
-            "signal_close": float(close),
-            "stop": float(stop),
-            "indicative_contracts": number(contracts),
-            "detected_at": self.client.now(),
-            "expires_at": float(expires_at),
-        }
+        candidate = {"id": candidate_id, "instrument": market}
         self.entry_candidates[market] = candidate
         self._save_candidates()
         if not existing or existing.get("id") != candidate_id:
@@ -732,10 +695,6 @@ class SwapRunner:
                 "entry_candidate",
                 instrument=market,
                 candidate_id=candidate_id,
-                bar=bar,
-                close=float(close),
-                stop=float(stop),
-                indicative_contracts=number(contracts),
             )
 
     def _take_scan_request(self):
@@ -808,7 +767,6 @@ class SwapRunner:
                     continue
 
                 row = frame.iloc[-1]
-                bar = row["timestamp"].isoformat()
                 age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
                 if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
                     if item is not None:
@@ -821,61 +779,12 @@ class SwapRunner:
                     self.store.event("market_recovered", instrument=market)
 
                 checked += 1
-                stop = _initial_stop(row, self.strategy)
-                if not bool(row["signal"]) or stop is None:
+                # Candidate generation is intentionally only a strategy filter.
+                # Execution price, stop price, fees and quantity are recalculated
+                # only if the user later chooses to open this instrument.
+                if not bool(row["signal"]) or _initial_stop(row, self.strategy) is None:
                     continue
-                stop = float(rounded(stop, instrument.tick))
-                try:
-                    bid, ask = self.quote(market)
-                    fee_rate = self.fees.get(market)
-                    if fee_rate is None:
-                        fee_rate = self._fee_rate(instrument)
-                except (MarketUnavailable, TransientRead, ValueError, OKXError) as exc:
-                    if item is not None and isinstance(exc, (MarketUnavailable, TransientRead)):
-                        self.market_warning(market, exc)
-                    skipped += 1
-                    continue
-                if item is not None and self.market_warnings.pop(market, None):
-                    self.store.event("market_recovered", instrument=market)
-                if bid <= stop:
-                    continue
-
-                limit = rounded(
-                    ask * (1 + self.config.max_entry_slippage_bps / 10000),
-                    instrument.tick,
-                )
-                if float(limit) < ask:
-                    continue
-                quantity = size_contracts(
-                    instrument,
-                    price=float(limit),
-                    stop=stop,
-                    market_budget=budget,
-                    total_budget=budget,
-                    available=account["available_usdt"],
-                    used_margin=used_margin,
-                    position=None,
-                    strategy=self.strategy,
-                    fee_rate=fee_rate,
-                    leverage=self.config.leverage,
-                )
-                if quantity == 0:
-                    continue
-
-                next_bar_close = (
-                    row["timestamp"].timestamp() + 2 * BAR_SECONDS[self.config.bar]
-                )
-                self._publish_candidate(
-                    market,
-                    bar=bar,
-                    close=float(row["close"]),
-                    stop=stop,
-                    contracts=quantity,
-                    expires_at=min(
-                        self.client.now() + self.config.max_signal_age_seconds,
-                        next_bar_close,
-                    ),
-                )
+                self._publish_candidate(market)
                 found += 1
 
             self.store.event(
@@ -1118,7 +1027,7 @@ class SwapRunner:
             return
 
     def _process_entry_approvals(self, account, budget, used_margin, stop_requested):
-        self._expire_candidates()
+        self._prune_candidates()
         approvals = self._approval_requests()
         if not approvals:
             return used_margin
@@ -1152,38 +1061,55 @@ class SwapRunner:
             return used_margin
 
         market = candidate["instrument"]
-        try:
-            instrument = self._ensure_managed_market(market)
-            item = self.state["markets"][market]
-        except (ValueError, TransientRead, OKXError) as exc:
-            self.store.event(
-                "entry_approval_rejected",
-                instrument=market,
-                candidate_id=candidate_id,
-                reason=str(exc),
-            )
-            self._ack_approval(candidate_id)
-            self._remove_candidate(market)
-            return used_margin
-        if item["position"] is not None:
-            self._ack_approval(candidate_id)
-            self._remove_candidate(market)
-            return used_margin
-        if candidate["expires_at"] <= self.client.now():
-            self.store.event(
-                "entry_approval_rejected",
-                instrument=market,
-                candidate_id=candidate_id,
-                reason="signal_expired",
-            )
+        item = self.state["markets"].get(market)
+        if item is not None and item["position"] is not None:
             self._ack_approval(candidate_id)
             self._remove_candidate(market)
             return used_margin
 
-        stop = float(candidate["stop"])
+        instrument = self.instruments.get(market)
+        if instrument is None:
+            try:
+                instrument = self._supported_catalog().get(market)
+            except (TransientRead, OKXError) as exc:
+                self.store.event(
+                    "entry_approval_rejected",
+                    instrument=market,
+                    candidate_id=candidate_id,
+                    reason=str(exc),
+                )
+                self._ack_approval(candidate_id)
+                return used_margin
+            if instrument is None:
+                self.store.event(
+                    "entry_approval_rejected",
+                    instrument=market,
+                    candidate_id=candidate_id,
+                    reason="instrument_unavailable",
+                )
+                self._ack_approval(candidate_id)
+                self._remove_candidate(market)
+                return used_margin
+
         try:
+            frame = closed_candles(self.client, market, self.strategy, self.config.bar)
+            row = frame.iloc[-1]
+            age = (
+                self.client.now()
+                - row["timestamp"].timestamp()
+                - BAR_SECONDS[self.config.bar]
+            )
+            if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
+                raise ValueError("latest confirmed candle is stale or in the future")
+            stop = _initial_stop(row, self.strategy)
+            if not bool(row["signal"]) or stop is None:
+                raise ValueError("strategy_condition_no_longer_met")
+            stop = float(rounded(stop, instrument.tick))
             bid, ask = self.quote(market)
-        except (MarketUnavailable, TransientRead) as exc:
+            fee_rate = self.fees.get(market)
+            if fee_rate is None:
+                fee_rate = self._fee_rate(instrument)
+        except (MarketUnavailable, TransientRead, ValueError, OKXError) as exc:
             self.store.event(
                 "entry_approval_rejected",
                 instrument=market,
@@ -1191,7 +1117,10 @@ class SwapRunner:
                 reason=str(exc),
             )
             self._ack_approval(candidate_id)
+            if isinstance(exc, ValueError) and str(exc) == "strategy_condition_no_longer_met":
+                self._remove_candidate(market)
             return used_margin
+
         if bid <= stop:
             self.store.event(
                 "entry_approval_rejected",
@@ -1221,7 +1150,7 @@ class SwapRunner:
             used_margin=used_margin,
             position=None,
             strategy=self.strategy,
-            fee_rate=self.fees[market],
+            fee_rate=fee_rate,
             leverage=self.config.leverage,
         )
         if quantity == 0:
@@ -1232,7 +1161,19 @@ class SwapRunner:
                 reason="below_minimum_or_budget",
             )
             self._ack_approval(candidate_id)
-            self._remove_candidate(market)
+            return used_margin
+
+        try:
+            instrument = self._ensure_managed_market(market)
+            item = self.state["markets"][market]
+        except (ValueError, TransientRead, OKXError) as exc:
+            self.store.event(
+                "entry_approval_rejected",
+                instrument=market,
+                candidate_id=candidate_id,
+                reason=str(exc),
+            )
+            self._ack_approval(candidate_id)
             return used_margin
 
         self.reconcile(market)
@@ -1279,7 +1220,7 @@ class SwapRunner:
         )
         self._ack_approval(candidate_id)
         if item["position"] is not None:
-            item["last_bar"] = candidate["bar"]
+            item["last_bar"] = row["timestamp"].isoformat()
             self.save()
             self._remove_candidate(market)
 
