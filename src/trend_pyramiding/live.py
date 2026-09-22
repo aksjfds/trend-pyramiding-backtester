@@ -1381,7 +1381,14 @@ class SwapRunner:
         except OKXError as exc:
             # An explicit rejection is terminal; transport/ambiguous writes remain pending.
             self.store.event(
-                "order_rejected", instrument=market, code=exc.code, client_id=client_id
+                "order_rejected",
+                instrument=market,
+                code=exc.top_code,
+                msg=exc.message,
+                sCode=exc.s_code,
+                sMsg=exc.s_message,
+                ordId=exc.order_id,
+                client_id=client_id,
             )
             self.state["pending"] = None
             self.save()
