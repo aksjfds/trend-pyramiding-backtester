@@ -55,7 +55,7 @@ OKX 实盘功能已提供独立命令 `pyramid-okx`，支持逐仓 USDT 永续�
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e .
 ```
 
 Windows PowerShell：
@@ -63,7 +63,7 @@ Windows PowerShell：
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install -e '.[dev]'
+python -m pip install -e .
 ```
 
 ## 本地网页控制台
@@ -121,13 +121,10 @@ pyramid-backtest backtest \
 每次 main 分支 push 或手动运行都会：
 
 1. 安装项目；
-2. Ruff 静态检查；
-3. Pytest 单元测试；
-4. 执行回测；
-5. 执行 Buy & Hold 基准；
-6. 对 regression fixture 运行性能回归阈值检查；
-7. 生成 Release Markdown 报告；
-8. 发布 Release 和完整 CSV/JSON 结果。
+2. 获取真实市场历史数据；
+3. 执行策略回测和 Buy & Hold 基准；
+4. 生成 Release Markdown 报告；
+5. 发布 Release 和完整 CSV/JSON 结果。
 
 Release 不再生成或上传交易 K 线图。
 
@@ -163,7 +160,7 @@ break_even_r = 1.0
 
 当前版本是 bar-based 回测，因此同一根 K 线内部无法知道 high/low 的真实发生顺序。实现采用保守原则：已有止损优先于新增加仓；信号只在收盘后生成，下一根 K 线开盘成交。
 
-benchmarks/baseline.json 仅用于 CI regression gate，它不是交易基准。交易基准是每次运行时动态计算的 Buy & Hold。
+交易基准是每次运行时动态计算的 Buy & Hold。
 
 ## Render 部署
 

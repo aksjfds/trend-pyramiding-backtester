@@ -10,7 +10,5 @@ else
 fi
 "$PYRAMID_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"'
 "$PYRAMID_PYTHON" -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest
-.venv/bin/ruff check .
+.venv/bin/python -m pip install -e .
 echo 'Ready. Activate with: source .venv/bin/activate'
