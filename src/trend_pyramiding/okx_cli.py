@@ -114,6 +114,9 @@ def run_worker(client, config, strategy, store, *, once=False):
             runner = SwapRunner(client, config, strategy, store)
             try:
                 runner.stop_requested = control.stop.is_set
+                runner.keepalive = lambda: control.update(
+                    "degraded" if runner.market_warnings else "ready"
+                )
                 initialized, failures = False, 0
                 next_sync = time.monotonic() + 300
                 while not control.stop.is_set():
