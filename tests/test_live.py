@@ -471,6 +471,97 @@ def test_step_creates_candidate_only_after_manual_scan_then_approval_opens(runne
     assert len(runner.client.orders) == 1
 
 
+def test_step_bulk_reconciles_managed_markets_with_one_position_read(runner, monkeypatch):
+    from dataclasses import replace
+
+    for market in ("ETH-USDT-SWAP", "SOL-USDT-SWAP"):
+        runner.instruments[market] = replace(INSTRUMENT, inst_id=market)
+        runner.state["markets"][market] = {"last_bar": None, "position": None}
+        runner.fees[market] = 0.0005
+
+    original = runner.client.get
+    reads = 0
+
+    def get(path, params=None, **kwargs):
+        nonlocal reads
+        if path.endswith("account/positions"):
+            reads += 1
+        return original(path, params, **kwargs)
+
+    monkeypatch.setattr(runner.client, "get", get)
+    runner.step()
+    assert reads == 1
+
+
+def test_healthy_position_skips_full_candle_reload_until_new_bar_possible(runner, monkeypatch):
+    submit(runner)
+    runner.state["markets"][MARKET]["last_bar"] = "2026-01-05T23:00:00+00:00"
+    runner.save()
+
+    original = runner.client.get
+    candle_reads = 0
+
+    def get(path, params=None, **kwargs):
+        nonlocal candle_reads
+        if path.endswith("market/candles"):
+            candle_reads += 1
+        return original(path, params, **kwargs)
+
+    monkeypatch.setattr(runner.client, "get", get)
+    runner.step()
+    assert candle_reads == 0
+
+    runner.client.clock += 3600
+    runner.step()
+    assert candle_reads == 1
+
+
+def test_verified_protection_does_not_rewrite_unchanged_safe_state(runner, monkeypatch):
+    submit(runner)
+    assert runner.state["markets"][MARKET]["position"]["unsafe"] is False
+
+    saves = 0
+    original_save = runner.save
+
+    def save():
+        nonlocal saves
+        saves += 1
+        original_save()
+
+    monkeypatch.setattr(runner, "save", save)
+    runner.verify_protection(MARKET)
+    assert saves == 0
+
+
+def test_candidate_scan_reuses_instrument_and_fee_metadata_cache(runner, monkeypatch):
+    other = "ETH-USDT-SWAP"
+    original = runner.client.get
+    instrument_reads = 0
+    fee_reads = 0
+
+    def get(path, params=None, **kwargs):
+        nonlocal instrument_reads, fee_reads
+        rows = original(path, params, **kwargs)
+        if path.endswith("public/instruments"):
+            instrument_reads += 1
+            return rows + [{**rows[0], "instId": other, "ctValCcy": "ETH"}]
+        if path.endswith("trade-fee"):
+            fee_reads += 1
+        return rows
+
+    monkeypatch.setattr(runner.client, "get", get)
+
+    request_candidate_scan(runner)
+    runner.step()
+    assert instrument_reads == 1
+    assert fee_reads == 1
+
+    request_candidate_scan(runner)
+    runner.step()
+    assert instrument_reads == 1
+    assert fee_reads == 1
+
+
 def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, monkeypatch):
     other = "ETH-USDT-SWAP"
     original = runner.client.get
