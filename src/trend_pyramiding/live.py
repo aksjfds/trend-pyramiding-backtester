@@ -8,10 +8,12 @@ import os
 import time
 import tomllib
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock, local
 
 import pandas as pd
 
@@ -35,6 +37,8 @@ from .signals import breakout_long_signal
 
 CONTROL_COMMAND_TTL_SECONDS = 30
 INSTRUMENT_CACHE_SECONDS = 60
+CANDIDATE_SCAN_WORKERS = 8
+CANDIDATE_CANDLE_REQUESTS_PER_SECOND = 15
 
 BAR_SECONDS = {
     "15m": 900,
@@ -684,7 +688,7 @@ class SwapRunner:
         if changed:
             self._save_candidates()
 
-    def _publish_candidate(self, market: str, volume_usdt_24h):
+    def _publish_candidate(self, market: str, volume_usdt_24h, *, persist=True):
         candidate_id = self._candidate_id(market)
         existing = self.entry_candidates.get(market)
         candidate = {
@@ -693,7 +697,8 @@ class SwapRunner:
             "volume_usdt_24h": number(volume_usdt_24h),
         }
         self.entry_candidates[market] = candidate
-        self._save_candidates()
+        if persist:
+            self._save_candidates()
         if not existing or existing.get("id") != candidate_id:
             self.store.event(
                 "entry_candidate",
@@ -731,6 +736,66 @@ class SwapRunner:
                     self.scan_store.save(data)
         except RuntimeError:
             pass
+
+    def _candidate_scan_rows(self, scan_instruments, stop_requested):
+        """Fetch unchanged 300-bar indicator frames concurrently, with OKX-safe pacing."""
+        if not scan_instruments:
+            return {}
+
+        real_client = isinstance(self.client, OKXClient)
+        rate_lock = Lock()
+        worker_state = local()
+        next_request_at = [time.monotonic()]
+        interval = 1 / CANDIDATE_CANDLE_REQUESTS_PER_SECOND
+
+        def worker_client():
+            if not real_client:
+                return self.client
+            client = getattr(worker_state, "client", None)
+            if client is None:
+                client = OKXClient(
+                    base_url=self.client.base_url,
+                    demo=self.client.demo,
+                    timeout=self.client.timeout,
+                )
+                worker_state.client = client
+            return client
+
+        def fetch(instrument):
+            if stop_requested():
+                return None
+            if real_client:
+                with rate_lock:
+                    now = time.monotonic()
+                    scheduled = max(now, next_request_at[0])
+                    next_request_at[0] = scheduled + interval
+                delay = scheduled - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+            if stop_requested():
+                return None
+            frame = closed_candles(
+                worker_client(),
+                instrument.inst_id,
+                self.strategy,
+                self.config.bar,
+            )
+            return frame.iloc[-1]
+
+        results = {}
+        workers = min(CANDIDATE_SCAN_WORKERS, len(scan_instruments))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(fetch, instrument): instrument
+                for instrument in scan_instruments
+            }
+            for future in as_completed(futures):
+                instrument = futures[future]
+                try:
+                    results[instrument.inst_id] = (future.result(), None)
+                except (MarketUnavailable, TransientRead, ValueError) as exc:
+                    results[instrument.inst_id] = (None, exc)
+        return results
 
     def _process_candidate_scan(self, account, budget, used_margin, stop_requested):
         request = self._take_scan_request()
@@ -779,6 +844,13 @@ class SwapRunner:
                 instruments="all_supported_usdt_swaps",
             )
 
+            fetch_instruments = [
+                instrument
+                for instrument in scan_instruments
+                if self.state["markets"].get(instrument.inst_id, {}).get("position") is None
+            ]
+            scan_rows = self._candidate_scan_rows(fetch_instruments, stop_requested)
+
             for instrument in scan_instruments:
                 self.keepalive()
                 if stop_requested():
@@ -788,15 +860,16 @@ class SwapRunner:
                 if item is not None and item["position"] is not None:
                     skipped += 1
                     continue
-                try:
-                    frame = closed_candles(self.client, market, self.strategy, self.config.bar)
-                except (MarketUnavailable, TransientRead, ValueError) as exc:
+                row, error = scan_rows.get(market, (None, None))
+                if error is not None:
                     if item is not None:
-                        self.market_warning(market, exc)
+                        self.market_warning(market, error)
+                    skipped += 1
+                    continue
+                if row is None:
                     skipped += 1
                     continue
 
-                row = frame.iloc[-1]
                 age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
                 if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
                     if item is not None:
@@ -817,9 +890,11 @@ class SwapRunner:
                 self._publish_candidate(
                     market,
                     volumes_usdt.get(market, dec(0)),
+                    persist=False,
                 )
                 found += 1
 
+            self._save_candidates()
             self.store.event(
                 "candidate_scan_completed",
                 request_id=request_id,
