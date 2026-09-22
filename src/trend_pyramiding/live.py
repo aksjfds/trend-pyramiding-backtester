@@ -749,7 +749,9 @@ class SwapRunner:
                     continue
                 try:
                     frame = closed_candles(self.client, market, self.strategy, self.config.bar)
-                except (MarketUnavailable, TransientRead, ValueError):
+                except (MarketUnavailable, TransientRead, ValueError) as exc:
+                    if item is not None:
+                        self.market_warning(market, exc)
                     skipped += 1
                     continue
 
@@ -757,8 +759,14 @@ class SwapRunner:
                 bar = row["timestamp"].isoformat()
                 age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
                 if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
+                    if item is not None:
+                        self.market_warning(
+                            market, "latest confirmed candle is stale or in the future"
+                        )
                     skipped += 1
                     continue
+                if item is not None and self.market_warnings.pop(market, None):
+                    self.store.event("market_recovered", instrument=market)
 
                 checked += 1
                 stop = _initial_stop(row, self.strategy)
@@ -773,9 +781,13 @@ class SwapRunner:
                             taker_fee(self.client, instrument),
                             self.strategy.fee_bps / 10000,
                         )
-                except (MarketUnavailable, TransientRead, ValueError, OKXError):
+                except (MarketUnavailable, TransientRead, ValueError, OKXError) as exc:
+                    if item is not None and isinstance(exc, (MarketUnavailable, TransientRead)):
+                        self.market_warning(market, exc)
                     skipped += 1
                     continue
+                if item is not None and self.market_warnings.pop(market, None):
+                    self.store.event("market_recovered", instrument=market)
                 if bid <= stop:
                     continue
 
