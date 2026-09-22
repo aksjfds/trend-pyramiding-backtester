@@ -477,6 +477,7 @@ class Controller:
                     "available_usdt",
                     "capital_limit_usdt_approx",
                     "open_positions",
+                    "positions",
                     "pending_orders",
                     "instruments",
                     "trade_permission",
