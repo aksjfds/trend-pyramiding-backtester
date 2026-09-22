@@ -897,7 +897,7 @@ def test_real_config_change_with_position_is_still_rejected(tmp_path):
         ).initialize()
 
 
-def test_wide_spread_recovers_same_bar_without_duplicate_order(runner, monkeypatch):
+def test_candidate_scan_ignores_spread_but_open_rechecks_execution(runner, monkeypatch):
     original = runner.client.get
     bad = True
 
@@ -909,19 +909,20 @@ def test_wide_spread_recovers_same_bar_without_duplicate_order(runner, monkeypat
     monkeypatch.setattr(runner.client, "get", get)
     request_candidate_scan(runner)
     runner.step()
+
+    candidates = runner.candidate_store.load()["candidates"]
+    assert candidates
+    assert not runner.client.orders
+
+    approve_first_candidate(runner)
     runner.step()
     assert not runner.client.orders
-    assert runner.state["markets"][MARKET]["last_bar"] is None
-    events = runner.store.path.with_suffix(".events.jsonl").read_text()
-    assert events.count("market_deferred") == 1
+    assert runner.candidate_store.load()["candidates"] == candidates
+
     bad = False
-    request_candidate_scan(runner)
-    runner.step()
-    assert runner.candidate_store.load()["candidates"]
     approve_first_candidate(runner)
     runner.step()
     assert len(runner.client.orders) == 1
-    assert not runner.market_warnings
 
 
 def test_one_market_data_failure_does_not_block_other_market(runner, monkeypatch):
@@ -1024,16 +1025,15 @@ def test_event_rotation_does_not_modify_order_state(tmp_path):
     assert events.with_name(events.name + ".1").stat().st_size == 5 * 1024 * 1024
 
 
-def test_expired_manual_approval_never_opens(runner):
+def test_candidate_has_no_scan_confirmation_timeout(runner):
     request_candidate_scan(runner)
     runner.step()
-    candidate_id = approve_first_candidate(runner)
+    approve_first_candidate(runner)
     runner.client.clock += runner.config.max_signal_age_seconds + 1
     runner.step()
-    assert not runner.client.orders
+
+    assert len(runner.client.orders) == 1
     assert runner.candidate_store.load()["candidates"] == []
-    approvals = runner.approval_store.load()["approvals"]
-    assert candidate_id not in [str(item.get("id")) for item in approvals if isinstance(item, dict)]
 
 
 def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(runner):
