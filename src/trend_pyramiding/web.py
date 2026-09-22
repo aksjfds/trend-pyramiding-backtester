@@ -119,6 +119,12 @@ class Controller:
                 raise ValueError("存在待核对订单，不能提交新的开仓")
             if state["markets"][instrument].get("position"):
                 raise ValueError("该币种已经有策略持仓")
+            scan_data = self.candidate_scan_store(demo).load()
+            if scan_data and scan_data.get("request"):
+                raise ValueError("候选扫描正在进行，请等待完成")
+            approval_data = self.approval_store(demo).load()
+            if approval_data and approval_data.get("approvals"):
+                raise ValueError("已有候选开仓正在处理，请等待完成")
 
             request_store = self.manual_entry_store(demo)
             try:
@@ -598,12 +604,15 @@ class Controller:
             candidate_error = None
             scan_pending = False
             manual_entry_pending = False
+            approval_pending = False
             try:
                 candidates = self.entry_candidates(demo)
                 scan_data = self.candidate_scan_store(demo).load()
                 scan_pending = bool(scan_data and scan_data.get("request"))
                 manual_data = self.manual_entry_store(demo).load()
                 manual_entry_pending = bool(manual_data and manual_data.get("request"))
+                approval_data = self.approval_store(demo).load()
+                approval_pending = bool(approval_data and approval_data.get("approvals"))
             except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:
                 candidate_error = self.redact(str(exc))
             credential_status = {}
@@ -658,6 +667,7 @@ class Controller:
                     and not halt
                     and not bool((state or {}).get("pending"))
                     and not manual_entry_pending
+                    and not approval_pending
                 ),
                 "entry_approval_enabled": bool(
                     running
@@ -669,6 +679,7 @@ class Controller:
                     and not bool((state or {}).get("pending"))
                     and not manual_entry_pending
                 ),
+                "entry_approval_pending": approval_pending,
                 "manual_entry_pending": manual_entry_pending,
                 "manual_entry_enabled": bool(
                     running
@@ -680,6 +691,7 @@ class Controller:
                     and not bool((state or {}).get("pending"))
                     and not manual_entry_pending
                     and not scan_pending
+                    and not approval_pending
                 ),
                 "manual_entry_instruments": [
                     row["instrument"]
