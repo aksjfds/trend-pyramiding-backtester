@@ -216,7 +216,8 @@ class Controller:
                     "instrument": str(candidate["instrument"]),
                 }
             )
-        return sorted(result, key=lambda item: item["instrument"])
+        # Preserve the worker's 24h-volume ranking.
+        return result
 
     def approve_entry(self, mode, candidate_id):
         if not isinstance(candidate_id, str) or not candidate_id:
