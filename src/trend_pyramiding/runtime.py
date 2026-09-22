@@ -11,6 +11,14 @@ import time
 from pathlib import Path
 
 
+def safe_console_print(*args, **kwargs):
+    """Best-effort console output that must never stop trading."""
+    try:
+        print(*args, **kwargs)
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+
+
 def heartbeat_path() -> Path:
     return Path(os.environ.get("PYRAMID_HEARTBEAT_FILE", "state/okx-heartbeat.json"))
 

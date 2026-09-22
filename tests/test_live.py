@@ -1,4 +1,5 @@
 import json
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 from trend_pyramiding.engine import BacktestConfig
 from trend_pyramiding.live import (
+    CONTROL_COMMAND_TTL_SECONDS,
     LiveConfig,
     StateStore,
     SwapRunner,
@@ -198,7 +200,11 @@ def request_candidate_scan(bot):
     bot.scan_store.save(
         {
             "version": 1,
-            "request": {"id": "scan-test", "requested_at": bot.client.now()},
+            "request": {
+                "id": "scan-test",
+                "requested_at": time.time(),
+                "expires_at": time.time() + CONTROL_COMMAND_TTL_SECONDS,
+            },
         }
     )
 
@@ -210,7 +216,8 @@ def request_manual_entry(bot, market=MARKET):
             "request": {
                 "id": "manual-entry-test",
                 "instrument": market,
-                "requested_at": bot.client.now(),
+                "requested_at": time.time(),
+                "expires_at": time.time() + CONTROL_COMMAND_TTL_SECONDS,
             },
         }
     )
@@ -220,7 +227,18 @@ def approve_first_candidate(bot):
     data = bot.candidate_store.load()
     assert data and data["candidates"]
     candidate_id = data["candidates"][0]["id"]
-    bot.approval_store.save({"version": 1, "approvals": [candidate_id]})
+    bot.approval_store.save(
+        {
+            "version": 1,
+            "approvals": [
+                {
+                    "id": candidate_id,
+                    "requested_at": time.time(),
+                    "expires_at": time.time() + CONTROL_COMMAND_TTL_SECONDS,
+                }
+            ],
+        }
+    )
     return candidate_id
 
 
@@ -813,7 +831,7 @@ def test_expired_manual_approval_never_opens(runner):
     assert not runner.client.orders
     assert runner.candidate_store.load()["candidates"] == []
     approvals = runner.approval_store.load()["approvals"]
-    assert candidate_id not in approvals
+    assert candidate_id not in [str(item.get("id")) for item in approvals if isinstance(item, dict)]
 
 
 def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(runner):
@@ -951,3 +969,184 @@ def test_specified_instrument_entry_is_taken_over_by_strategy(runner):
         ),
     )
     assert runner.state["markets"][MARKET]["position"]["stop"] >= old_stop
+
+
+def test_broken_console_pipe_does_not_break_event_persistence(tmp_path, monkeypatch):
+    store = StateStore(tmp_path / "live.json")
+
+    def broken_print(*args, **kwargs):
+        raise BrokenPipeError("closed stdout")
+
+    monkeypatch.setattr("builtins.print", broken_print)
+    store.event("console_pipe_test", value=1)
+
+    record = json.loads(store.path.with_suffix(".events.jsonl").read_text())
+    assert record["event"] == "console_pipe_test"
+    assert not store.halt_path.exists()
+
+
+def test_expired_candidate_scan_command_is_discarded(runner):
+    runner.scan_store.save(
+        {
+            "version": 1,
+            "request": {
+                "id": "expired-scan",
+                "requested_at": time.time() - 60,
+                "expires_at": time.time() - 1,
+            },
+        }
+    )
+    runner.step()
+    assert runner.candidate_store.load()["candidates"] == []
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert "candidate_scan_expired" in events
+
+
+def test_expired_manual_entry_command_never_opens(runner):
+    runner.manual_entry_store.save(
+        {
+            "version": 1,
+            "request": {
+                "id": "expired-manual",
+                "instrument": MARKET,
+                "requested_at": time.time() - 60,
+                "expires_at": time.time() - 1,
+            },
+        }
+    )
+    runner.step()
+    assert not runner.client.orders
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert "command_expired" in events
+
+
+def test_expired_candidate_approval_never_opens(runner):
+    request_candidate_scan(runner)
+    runner.step()
+    candidate = runner.candidate_store.load()["candidates"][0]
+    runner.approval_store.save(
+        {
+            "version": 1,
+            "approvals": [
+                {
+                    "id": candidate["id"],
+                    "requested_at": time.time() - 60,
+                    "expires_at": time.time() - 1,
+                }
+            ],
+        }
+    )
+    runner.step()
+    assert not runner.client.orders
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert "command_expired" in events
+
+
+def test_manual_entry_rejects_stale_confirmed_candle(runner):
+    runner.client.clock += 7200
+    request_manual_entry(runner)
+    runner.step()
+    assert not runner.client.orders
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert "latest confirmed candle is stale or in the future" in events
+
+
+def test_restart_rejects_position_outside_managed_universe(tmp_path, monkeypatch):
+    exchange = Exchange()
+    store = StateStore(tmp_path / "live.json")
+    SwapRunner(
+        exchange,
+        LiveConfig(instruments=(MARKET,)),
+        BacktestConfig(),
+        store,
+    ).initialize()
+    original = exchange.get
+
+    def get(path, params=None, **kwargs):
+        rows = original(path, params, **kwargs)
+        if path.endswith("account/positions"):
+            return rows + [
+                {
+                    "instId": "ETH-USDT-SWAP",
+                    "pos": "1",
+                    "mgnMode": "isolated",
+                    "posSide": "net",
+                    "lever": str(exchange.leverage),
+                }
+            ]
+        return rows
+
+    monkeypatch.setattr(exchange, "get", get)
+    with pytest.raises(RuntimeError, match="outside managed instruments"):
+        SwapRunner(
+            exchange,
+            LiveConfig(instruments=(MARKET,)),
+            BacktestConfig(),
+            store,
+        ).initialize()
+
+
+def test_restart_rejects_unknown_algorithmic_order(tmp_path, monkeypatch):
+    exchange = Exchange()
+    store = StateStore(tmp_path / "live.json")
+    SwapRunner(
+        exchange,
+        LiveConfig(instruments=(MARKET,)),
+        BacktestConfig(),
+        store,
+    ).initialize()
+    original = exchange.get
+
+    def get(path, params=None, **kwargs):
+        if path.endswith("orders-algo-pending"):
+            return [
+                {
+                    "algoClOrdId": "unknown-manual-stop",
+                    "algoId": "external-1",
+                }
+            ]
+        return original(path, params, **kwargs)
+
+    monkeypatch.setattr(exchange, "get", get)
+    with pytest.raises(RuntimeError, match="unexpected pending algorithmic order"):
+        SwapRunner(
+            exchange,
+            LiveConfig(instruments=(MARKET,)),
+            BacktestConfig(),
+            store,
+        ).initialize()
+
+
+def test_stop_request_prevents_candidate_order_after_final_reconcile(runner, monkeypatch):
+    request_candidate_scan(runner)
+    runner.step()
+    approve_first_candidate(runner)
+    stopped = False
+    original_reconcile = runner.reconcile
+
+    def reconcile(market):
+        nonlocal stopped
+        original_reconcile(market)
+        stopped = True
+
+    monkeypatch.setattr(runner, "reconcile", reconcile)
+    account = account_snapshot(runner.client)
+    budget = min(
+        runner.state["capital_ceiling"],
+        account["equity"] * runner.config.capital_fraction,
+    )
+    runner._process_entry_approvals(
+        account,
+        budget,
+        0.0,
+        lambda: stopped,
+    )
+    assert not runner.client.orders
+
+
+def test_flat_market_warning_recovers_without_candidate_scan(runner):
+    runner.market_warnings[MARKET] = "temporary transport"
+    runner.step()
+    assert MARKET not in runner.market_warnings
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert "market_recovered" in events

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .live import LiveConfig, StateStore, SwapRunner, account_snapshot, selected_config
 from .okx import Credentials, OKXClient, OKXError, TransientRead, UncertainWrite, dec, universe
-from .runtime import ProcessControl
+from .runtime import ProcessControl, safe_console_print
 from .settings import load_settings
 
 
@@ -63,7 +63,7 @@ def watch_account(client, config, store):
                 client.sync_time()
                 report = check_account(client, config, store)
                 # Routine monitor logs do not include account balances or credentials.
-                print(
+                safe_console_print(
                     json.dumps(
                         {
                             "event": "read_only_check",
@@ -79,7 +79,7 @@ def watch_account(client, config, store):
                 )
                 control.update("ready")
             except Exception as exc:
-                print(
+                safe_console_print(
                     json.dumps(
                         {
                             "event": "read_only_check_failed",
@@ -96,7 +96,7 @@ def watch_account(client, config, store):
 def run_worker(client, config, strategy, store, *, once=False):
     with ProcessControl() as control:
         if store.halt_path.exists():
-            print(
+            safe_console_print(
                 "Trading is paused by a persistent halt marker. Inspect state, clear-halt, then restart.",
                 flush=True,
             )
@@ -200,11 +200,11 @@ def main():
         if args.command == "status":
             state = store.load()
             if state is None:
-                print("No saved trading state; runner has not been initialized.")
+                safe_console_print("No saved trading state; runner has not been initialized.")
                 if store.halt_path.exists():
-                    print("Persistent halt marker exists; trading is paused.")
+                    safe_console_print("Persistent halt marker exists; trading is paused.")
             else:
-                print(
+                safe_console_print(
                     json.dumps(
                         {
                             "environment": environment,
@@ -228,7 +228,7 @@ def main():
             return
         if args.command == "clear-halt":
             store.clear_halt()
-            print("Halt marker cleared. Trading state is preserved; restart the worker manually.")
+            safe_console_print("Halt marker cleared. Trading state is preserved; restart the worker manually.")
             return
         if args.command == "run" and not config.demo and not args.live:
             raise ValueError("real orders require run --live; check is read-only")
@@ -248,7 +248,7 @@ def main():
             client.sync_time()
         if args.command == "scan":
             instruments = universe(client, config.top_n, config.instruments)
-            print(
+            safe_console_print(
                 json.dumps(
                     {
                         "environment": environment,
@@ -264,7 +264,7 @@ def main():
             )
             return
         if args.command == "check":
-            print(json.dumps(check_account(client, config, store), indent=2))
+            safe_console_print(json.dumps(check_account(client, config, store), indent=2))
             return
         run_worker(client, config, strategy, store, once=args.once)
     except (ValueError, RuntimeError, OKXError, TransientRead, UncertainWrite, OSError) as exc:

@@ -20,9 +20,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 
-from .live import LiveConfig, StateStore, selected_config
+from .live import CONTROL_COMMAND_TTL_SECONDS, LiveConfig, StateStore, selected_config
 from .local_credentials import load_local_credentials
 from .okx import Credentials, Instrument, OKXClient, dec
+from .runtime import safe_console_print
 from .settings import load_settings, save_settings, schema, settings_values
 
 MODES = {
@@ -87,38 +88,48 @@ class Controller:
     def manual_entry_store(self, demo):
         return StateStore(self.store(demo).path.with_suffix(".manual-entry.json"))
 
+    def _require_trading_worker(self, mode):
+        running = self.process is not None and self.process.poll() is None
+        if not running or self.stopping or self.closing:
+            raise ValueError("策略未运行，不能执行交易操作")
+        if mode != self.mode:
+            raise ValueError("页面运行方式与当前策略进程不一致，请刷新页面")
+        demo, trading = self.profile(self.mode)
+        if not trading:
+            raise ValueError("只读观察模式不能执行交易操作")
+        try:
+            beat = json.loads(self.heartbeat.read_text())
+        except (OSError, ValueError, TypeError):
+            beat = {}
+        max_age = max(30, self.config.poll_seconds * 3)
+        heartbeat_age = time.time() - float(beat.get("updated_at", 0))
+        if (
+            beat.get("pid") != self.process.pid
+            or beat.get("phase") not in {"ready", "degraded"}
+            or heartbeat_age < 0
+            or heartbeat_age > max_age
+        ):
+            raise ValueError("策略心跳已过期或未就绪，请等待运行恢复后重试")
+        store = self.store(demo)
+        if store.halt_path.exists():
+            raise ValueError("策略处于异常暂停状态，不能执行交易操作")
+        state = store.load()
+        if not state:
+            raise ValueError("策略状态尚未初始化，请等待运行准备完成")
+        if state.get("pending"):
+            raise ValueError("存在待核对订单，不能提交新的交易操作")
+        return demo, store, state
+
     def request_manual_entry(self, mode, instrument):
         if not isinstance(instrument, str) or not instrument:
             raise ValueError("请选择有效的币种")
         with self.lock:
-            running = self.process is not None and self.process.poll() is None
-            if not running or self.stopping or self.closing:
-                raise ValueError("策略未运行，不能手动开仓")
-            if mode != self.mode:
-                raise ValueError("页面运行方式与当前策略进程不一致，请刷新页面")
-            demo, trading = self.profile(self.mode)
-            if not trading:
-                raise ValueError("只读观察模式不能手动开仓")
-            try:
-                beat = json.loads(self.heartbeat.read_text())
-            except (OSError, ValueError, TypeError):
-                beat = {}
-            if (
-                beat.get("pid") != self.process.pid
-                or beat.get("phase") not in {"ready", "degraded"}
-            ):
-                raise ValueError("策略尚未准备好开仓，请等待运行状态稳定")
-
-            store = self.store(demo)
-            if store.halt_path.exists():
-                raise ValueError("策略处于异常暂停状态，不能手动开仓")
-            state = store.load()
-            if not state or instrument not in state.get("markets", {}):
+            demo, store, state = self._require_trading_worker(mode)
+            if instrument not in state.get("markets", {}):
                 raise ValueError("该币种不在当前策略管理列表，请先停止策略并修改交易币种")
-            if state.get("pending"):
-                raise ValueError("存在待核对订单，不能提交新的开仓")
             if state["markets"][instrument].get("position"):
                 raise ValueError("该币种已经有策略持仓")
+
             scan_data = self.candidate_scan_store(demo).load()
             if scan_data and scan_data.get("request"):
                 raise ValueError("候选扫描正在进行，请等待完成")
@@ -132,13 +143,15 @@ class Controller:
                     data = request_store.load() or {"version": 1, "request": None}
                     if data.get("request"):
                         raise ValueError("已有手动开仓请求正在处理，请等待完成")
+                    now = time.time()
                     request_store.save(
                         {
                             "version": 1,
                             "request": {
                                 "id": secrets.token_hex(12),
                                 "instrument": instrument,
-                                "requested_at": time.time(),
+                                "requested_at": now,
+                                "expires_at": now + CONTROL_COMMAND_TTL_SECONDS,
                             },
                         }
                     )
@@ -147,29 +160,7 @@ class Controller:
 
     def request_candidate_scan(self, mode):
         with self.lock:
-            running = self.process is not None and self.process.poll() is None
-            if not running or self.stopping or self.closing:
-                raise ValueError("策略未运行，不能生成候选")
-            if mode != self.mode:
-                raise ValueError("页面运行方式与当前策略进程不一致，请刷新页面")
-            demo, trading = self.profile(self.mode)
-            if not trading:
-                raise ValueError("只读观察模式不能生成开仓候选")
-            try:
-                beat = json.loads(self.heartbeat.read_text())
-            except (OSError, ValueError, TypeError):
-                beat = {}
-            if (
-                beat.get("pid") != self.process.pid
-                or beat.get("phase") not in {"ready", "degraded"}
-            ):
-                raise ValueError("策略尚未准备好生成候选，请等待运行状态稳定")
-            store = self.store(demo)
-            if store.halt_path.exists():
-                raise ValueError("策略处于异常暂停状态，不能生成候选")
-            state = store.load()
-            if state and state.get("pending"):
-                raise ValueError("存在待核对订单，不能生成新的候选")
+            demo, _, _ = self._require_trading_worker(mode)
             manual_data = self.manual_entry_store(demo).load()
             if manual_data and manual_data.get("request"):
                 raise ValueError("已有手动开仓正在处理，请等待完成")
@@ -183,11 +174,17 @@ class Controller:
                     data = scan_store.load() or {"version": 1, "request": None}
                     if data.get("request"):
                         raise ValueError("候选扫描已提交，请等待完成")
-                    request = {
-                        "id": secrets.token_hex(12),
-                        "requested_at": time.time(),
-                    }
-                    scan_store.save({"version": 1, "request": request})
+                    now = time.time()
+                    scan_store.save(
+                        {
+                            "version": 1,
+                            "request": {
+                                "id": secrets.token_hex(12),
+                                "requested_at": now,
+                                "expires_at": now + CONTROL_COMMAND_TTL_SECONDS,
+                            },
+                        }
+                    )
             except RuntimeError:
                 raise ValueError("策略正在处理候选扫描，请稍后重试") from None
 
@@ -224,39 +221,19 @@ class Controller:
         if not isinstance(candidate_id, str) or not candidate_id:
             raise ValueError("请选择有效的待开仓信号")
         with self.lock:
-            running = self.process is not None and self.process.poll() is None
-            if not running or self.stopping or self.closing:
-                raise ValueError("策略未运行，不能提交开仓")
-            active_mode = self.mode
-            if mode != active_mode:
-                raise ValueError("页面运行方式与当前策略进程不一致，请刷新页面")
-            demo, trading = self.profile(active_mode)
-            if not trading:
-                raise ValueError("只读观察模式不能开仓")
-            try:
-                beat = json.loads(self.heartbeat.read_text())
-            except (OSError, ValueError, TypeError):
-                beat = {}
-            if (
-                beat.get("pid") != self.process.pid
-                or beat.get("phase") not in {"ready", "degraded"}
-            ):
-                raise ValueError("策略尚未准备好开仓，请等待运行状态稳定")
-            store = self.store(demo)
-            if store.halt_path.exists():
-                raise ValueError("策略处于异常暂停状态，不能开仓")
-            state = store.load()
-            if state and state.get("pending"):
-                raise ValueError("存在待核对订单，不能提交新的开仓")
+            demo, _, _ = self._require_trading_worker(mode)
             manual_data = self.manual_entry_store(demo).load()
             if manual_data and manual_data.get("request"):
                 raise ValueError("已有手动开仓正在处理，请等待完成")
+            scan_data = self.candidate_scan_store(demo).load()
+            if scan_data and scan_data.get("request"):
+                raise ValueError("候选扫描正在进行，请等待完成")
             candidate = next(
                 (item for item in self.entry_candidates(demo) if item["id"] == candidate_id),
                 None,
             )
             if candidate is None:
-                raise ValueError("该开仓信号已失效，请等待下一根 K 线重新检测")
+                raise ValueError("该开仓信号已失效，请重新生成候选")
 
             queue = self.approval_store(demo)
             try:
@@ -265,9 +242,19 @@ class Controller:
                     approvals = data.get("approvals", [])
                     if not isinstance(approvals, list):
                         raise ValueError("开仓批准队列格式错误")
-                    approvals = [str(item) for item in approvals]
-                    if candidate_id not in approvals:
-                        approvals.append(candidate_id)
+                    if approvals:
+                        raise ValueError("已有候选开仓正在处理，请等待完成")
+                    now = time.time()
+                    approvals = [
+                        {
+                            "id": candidate_id,
+                            "requested_at": now,
+                            "expires_at": min(
+                                float(candidate["expires_at"]),
+                                now + CONTROL_COMMAND_TTL_SECONDS,
+                            ),
+                        }
+                    ]
                     queue.save({"version": 1, "approvals": approvals})
             except RuntimeError:
                 raise ValueError("策略正在处理开仓批准，请稍后重试") from None
@@ -471,7 +458,7 @@ class Controller:
         try:
             for line in process.stdout:
                 entry = {"time": time.time(), "text": self.redact(line.rstrip())[:4000]}
-                print(entry["text"], flush=True)
+                safe_console_print(entry["text"], flush=True)
                 with self.lock:
                     if self.process is process:
                         self.logs.append(entry)
@@ -596,6 +583,12 @@ class Controller:
                         }
                 except (OSError, ValueError, AttributeError):
                     pass
+            heartbeat_fresh = bool(
+                heartbeat
+                and heartbeat.get("phase") in {"ready", "degraded"}
+                and 0 <= time.time() - float(heartbeat.get("updated_at", 0))
+                <= max(30, self.config.poll_seconds * 3)
+            )
             selected = []
             try:
                 selected = list(selected_config(self.config, store).instruments)
@@ -666,8 +659,7 @@ class Controller:
                 "candidate_scan_pending": scan_pending,
                 "candidate_scan_enabled": bool(
                     running
-                    and heartbeat
-                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and heartbeat_fresh
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
@@ -677,20 +669,20 @@ class Controller:
                 ),
                 "entry_approval_enabled": bool(
                     running
-                    and heartbeat
-                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and heartbeat_fresh
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
                     and not bool((state or {}).get("pending"))
                     and not manual_entry_pending
+                    and not scan_pending
+                    and not approval_pending
                 ),
                 "entry_approval_pending": approval_pending,
                 "manual_entry_pending": manual_entry_pending,
                 "manual_entry_enabled": bool(
                     running
-                    and heartbeat
-                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and heartbeat_fresh
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
@@ -883,13 +875,13 @@ def main():
                     threading.Thread(target=server.shutdown, daemon=True).start()
 
                 previous = {s: signal.signal(s, shutdown) for s in (signal.SIGINT, signal.SIGTERM)}
-                print(f"网页已启动：{server.origin}（尚未启动策略）", flush=True)
+                safe_console_print(f"网页已启动：{server.origin}（尚未启动策略）", flush=True)
                 if args.open:
                     webbrowser.open(server.origin)
                 try:
                     server.serve_forever()
                 finally:
-                    print("正在停止策略，等待当前操作结束…", flush=True)
+                    safe_console_print("正在停止策略，等待当前操作结束…", flush=True)
                     controller.close()
                     for s, handler in previous.items():
                         signal.signal(s, handler)
