@@ -203,7 +203,6 @@ def request_candidate_scan(bot):
                 "id": "scan-test",
                 "requested_at": bot.client.now(),
                 "expires_at": bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
-                "expires_at": bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
             },
         }
     )
@@ -217,6 +216,7 @@ def request_manual_entry(bot, market=MARKET):
                 "id": "manual-entry-test",
                 "instrument": market,
                 "requested_at": bot.client.now(),
+                "expires_at": bot.client.now() + CONTROL_COMMAND_TTL_SECONDS,
             },
         }
     )
