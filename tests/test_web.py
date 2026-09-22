@@ -217,6 +217,7 @@ def test_http_page_assets_status_and_no_secret_exposure(server):
     assert 'id="advanced-settings"' not in page
     assert 'id="settings-form"' not in page
     assert "符合策略的币种" in page
+    assert "24h USDT 成交量" in page
     assert "信号收盘价" not in page
     assert "预计张数" not in page
     assert "剩余确认时间" not in page
@@ -491,6 +492,7 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
+        "volume_usdt_24h": "123456789",
     }
     controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
 
@@ -514,8 +516,8 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
 
 def test_candidate_api_preserves_worker_volume_order(controller):
     candidates = [
-        {"id": "eth", "instrument": "ETH-USDT-SWAP"},
-        {"id": "btc", "instrument": "BTC-USDT-SWAP"},
+        {"id": "eth", "instrument": "ETH-USDT-SWAP", "volume_usdt_24h": "2500000"},
+        {"id": "btc", "instrument": "BTC-USDT-SWAP", "volume_usdt_24h": "1000000"},
     ]
     controller.candidate_store(False).save({"version": 1, "candidates": candidates})
     assert controller.entry_candidates(False) == candidates
@@ -533,6 +535,7 @@ def test_manual_entry_approval_rejected_in_readonly_mode(controller):
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
+        "volume_usdt_24h": "123456789",
     }
     controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
     with pytest.raises(ValueError, match="只读"):
@@ -747,6 +750,7 @@ def test_manual_actions_are_mutually_exclusive(controller):
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
+        "volume_usdt_24h": "123456789",
     }
     controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
 
