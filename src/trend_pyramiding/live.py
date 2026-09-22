@@ -299,7 +299,7 @@ def _legacy_state_matches_current(state, config, strategy, uid):
     )
 
 
-def taker_fee(client: OKXClient, instrument: Instrument) -> float:def taker_fee(client: OKXClient, instrument: Instrument) -> float:
+def taker_fee(client: OKXClient, instrument: Instrument) -> float:
     params = {"instType": "SWAP"}
     if instrument.fee_group:
         params["groupId"] = instrument.fee_group
