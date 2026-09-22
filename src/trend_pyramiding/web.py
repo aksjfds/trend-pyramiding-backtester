@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 
-from .live import CONTROL_COMMAND_TTL_SECONDS, LiveConfig, StateStore, selected_config
+from .live import CONTROL_COMMAND_TTL_SECONDS, LiveConfig, StateStore
 from .local_credentials import load_local_credentials
 from .okx import Credentials, Instrument, OKXClient, dec
 from .runtime import safe_console_print
@@ -337,45 +337,10 @@ class Controller:
         finally:
             self.catalog_lock.release()
 
-    def save_selection(self, mode, instruments):
-        demo, _ = self.profile(mode)
-        if (
-            not isinstance(instruments, list)
-            or len(instruments) > 10
-            or any(not isinstance(x, str) for x in instruments)
-            or len(set(instruments)) != len(instruments)
-        ):
-            raise ValueError("请选择最多 10 个不同的永续合约")
-        if instruments:
-            available = {item["instrument"] for item in self.catalog(mode)}
-            if not set(instruments) <= available:
-                raise ValueError("所选币种不支持交易或已下架，请刷新币种列表")
-        with self.lock:
-            if self.closing or self.checking or (self.process and self.process.poll() is None):
-                raise ValueError("请等待账户读取完成并停止运行后再更改币种")
-            store = self.store(demo)
-            with store.lock():
-                state = store.load()
-                if store.halt_path.exists() or (
-                    state
-                    and (
-                        state.get("pending")
-                        or any(x.get("position") for x in state["markets"].values())
-                    )
-                ):
-                    raise ValueError("当前仍有持仓、待核对订单或暂停记录，不能更换币种")
-                StateStore(store.path.with_suffix(".selection.json")).save(
-                    {"version": 1, "instruments": instruments}
-                )
-                cached = self.accounts.get("demo" if demo else "live")
-                if cached and cached.get("data"):
-                    cached["data"]["instruments"] = list(instruments)
-
     def effective_settings(self, demo):
-        config, strategy = load_settings(
+        return load_settings(
             replace(self.config, demo=demo), self.strategy, self.store(demo)
         )
-        return selected_config(config, self.store(demo)), strategy
 
     def save_parameters(self, mode, values):
         demo, _ = self.profile(mode)
@@ -598,11 +563,6 @@ class Controller:
                 and 0 <= time.time() - float(heartbeat.get("updated_at", 0))
                 <= max(30, self.config.poll_seconds * 3)
             )
-            selected = []
-            try:
-                selected = list(selected_config(self.config, store).instruments)
-            except (ValueError, OSError, KeyError, TypeError, AttributeError):
-                error = "无法读取币种选择，请检查 selection.json；不要删除交易状态"
             config, strategy = replace(self.config, demo=demo), self.strategy
             try:
                 config, strategy = self.effective_settings(demo)
@@ -647,24 +607,8 @@ class Controller:
                     "bar": config.bar,
                     "leverage": config.leverage,
                     "capital_fraction": config.capital_fraction,
-                    "top_n": config.top_n,
                 },
                 "parameters": {"values": settings_values(config, strategy), "fields": schema()},
-                "selection": {
-                    "instruments": selected,
-                    "locked": bool(
-                        running
-                        or halt
-                        or error
-                        or (
-                            state
-                            and (
-                                state.get("pending")
-                                or any(m.get("position") for m in state.get("markets", {}).values())
-                            )
-                        )
-                    ),
-                },
                 "entry_candidates": candidates,
                 "entry_candidate_error": candidate_error,
                 "candidate_scan_pending": scan_pending,
@@ -839,8 +783,6 @@ class Handler(BaseHTTPRequestHandler):
                 controller.stop()
             elif self.path == "/api/settings":
                 controller.save_parameters(data.get("mode", "watch"), data.get("values"))
-            elif self.path == "/api/selection":
-                controller.save_selection(data.get("mode", "watch"), data.get("instruments"))
             elif self.path == "/api/check":
                 controller.check(data.get("mode", "watch"))
             elif self.path == "/api/approve-entry":
