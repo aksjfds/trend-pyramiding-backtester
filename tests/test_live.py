@@ -572,7 +572,7 @@ def test_candidate_scan_only_filters_strategy_without_execution_reads(runner, mo
     assert ticker_reads == 0
 
 
-def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, monkeypatch):
+def test_candidate_scan_checks_all_supported_markets_and_sorts_by_volume(runner, monkeypatch):
     other = "ETH-USDT-SWAP"
     original = runner.client.get
 
@@ -580,6 +580,11 @@ def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, mo
         rows = original(path, params, **kwargs)
         if path.endswith("public/instruments"):
             return rows + [{**rows[0], "instId": other, "ctValCcy": "ETH"}]
+        if path.endswith("market/tickers"):
+            return [
+                {"instId": MARKET, "volCcy24h": "10000", "last": "100"},
+                {"instId": other, "volCcy24h": "50000", "last": "50"},
+            ]
         return rows
 
     monkeypatch.setattr(runner.client, "get", get)
@@ -592,7 +597,7 @@ def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, mo
     runner.step()
 
     candidates = runner.candidate_store.load()["candidates"]
-    assert {item["instrument"] for item in candidates} == {MARKET, other}
+    assert [item["instrument"] for item in candidates] == [other, MARKET]
     assert all(set(item) == {"id", "instrument"} for item in candidates)
     assert other not in runner.state["markets"]
     scan_state = runner.scan_store.load()
