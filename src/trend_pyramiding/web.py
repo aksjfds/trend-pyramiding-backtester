@@ -170,6 +170,12 @@ class Controller:
             state = store.load()
             if state and state.get("pending"):
                 raise ValueError("存在待核对订单，不能生成新的候选")
+            manual_data = self.manual_entry_store(demo).load()
+            if manual_data and manual_data.get("request"):
+                raise ValueError("已有手动开仓正在处理，请等待完成")
+            approval_data = self.approval_store(demo).load()
+            if approval_data and approval_data.get("approvals"):
+                raise ValueError("已有候选开仓正在处理，请等待完成")
 
             scan_store = self.candidate_scan_store(demo)
             try:
