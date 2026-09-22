@@ -7,8 +7,8 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from .live import LiveConfig, StateStore, SwapRunner, account_snapshot, selected_config
-from .okx import Credentials, OKXClient, OKXError, TransientRead, UncertainWrite, dec, universe
+from .live import LiveConfig, StateStore, SwapRunner, account_snapshot
+from .okx import Credentials, OKXClient, OKXError, TransientRead, UncertainWrite, dec, supported_instruments
 from .runtime import ProcessControl, safe_console_print
 from .settings import load_settings
 
@@ -19,10 +19,9 @@ def check_account(client, config, store):
     instruments, positions, pending = [], None, None
     try:
         state = store.load()
-        requested = config.instruments or (tuple(state["markets"]) if state else ())
-        instruments = [i.inst_id for i in universe(client, config.top_n, requested)]
+        instruments = list((state or {}).get("markets", {}))
     except (ValueError, RuntimeError, OSError) as exc:
-        warnings.append(f"候选币种读取失败：{exc}")
+        warnings.append(f"策略管理币种读取失败：{exc}")
         state = None
     try:
         positions = sum(
@@ -110,7 +109,6 @@ def run_worker(client, config, strategy, store, *, once=False):
                 raise RuntimeError("persistent halt marker prevents startup")
             # Re-read under the trading lock so a simultaneous settings save cannot be missed.
             config, strategy = load_settings(config, strategy, store)
-            config = selected_config(config, store)
             runner = SwapRunner(client, config, strategy, store)
             try:
                 runner.stop_requested = control.stop.is_set
@@ -250,13 +248,12 @@ def main():
         if args.command != "run":
             client.sync_time()
         if args.command == "scan":
-            instruments = universe(client, config.top_n, config.instruments)
+            instruments = supported_instruments(client)
             safe_console_print(
                 json.dumps(
                     {
                         "environment": environment,
                         "bar": config.bar,
-                        "selection": "24h base volume × latest price (approximate USDT turnover)",
                         "instruments": [i.inst_id for i in instruments],
                         "leverage": config.leverage,
                         "capital_fraction": config.capital_fraction,
