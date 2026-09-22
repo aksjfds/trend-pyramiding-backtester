@@ -218,6 +218,8 @@ def test_http_page_assets_status_and_no_secret_exposure(server):
     assert 'id="settings-form"' not in page
     assert "符合策略的币种" in page
     assert "24h USDT 成交量" in page
+    assert '<input id="manual-entry-instrument" type="text"' in page
+    assert '<select id="manual-entry-instrument"' not in page
     assert "信号收盘价" not in page
     assert "预计张数" not in page
     assert "剩余确认时间" not in page
