@@ -131,7 +131,6 @@ class Application:
                 "/api/start",
                 "/api/stop",
                 "/api/check",
-                "/api/selection",
                 "/api/settings",
                 "/api/approve-entry",
                 "/api/generate-candidates",
@@ -151,10 +150,6 @@ class Application:
                     )
                 elif path == "/api/settings":
                     self.controller.save_parameters(data.get("mode", "watch"), data.get("values"))
-                elif path == "/api/selection":
-                    self.controller.save_selection(
-                        data.get("mode", "watch"), data.get("instruments")
-                    )
                 elif path == "/api/approve-entry":
                     self.controller.approve_entry(
                         data.get("mode", "watch"), data.get("candidate_id")
@@ -163,7 +158,9 @@ class Application:
                     self.controller.request_candidate_scan(data.get("mode", "watch"))
                 elif path == "/api/manual-entry":
                     self.controller.request_manual_entry(
-                        data.get("mode", "watch"), data.get("instrument")
+                        data.get("mode", "watch"),
+                        data.get("instrument"),
+                        data.get("capital_fraction"),
                     )
                 elif path == "/api/stop":
                     self.controller.stop()
