@@ -635,6 +635,12 @@ class SwapRunner:
             return None
         if not isinstance(request, dict) or not request.get("id"):
             return None
+        if float(request.get("expires_at", 0)) <= self.client.now():
+            self.store.event(
+                "candidate_scan_expired",
+                request_id=str(request["id"]),
+            )
+            return None
         return request
 
     def _process_candidate_scan(self, account, budget, used_margin, stop_requested):
@@ -744,6 +750,14 @@ class SwapRunner:
             return None
         if not isinstance(request, dict) or not request.get("id") or not request.get("instrument"):
             return None
+        if float(request.get("expires_at", 0)) <= self.client.now():
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=str(request["id"]),
+                instrument=str(request["instrument"]),
+                reason="command_expired",
+            )
+            return None
         return request
 
     def _process_manual_entry_request(
@@ -779,6 +793,13 @@ class SwapRunner:
         try:
             frame = closed_candles(self.client, market, self.strategy, self.config.bar)
             row = frame.iloc[-1]
+            age = (
+                self.client.now()
+                - row["timestamp"].timestamp()
+                - BAR_SECONDS[self.config.bar]
+            )
+            if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
+                raise ValueError("latest confirmed candle is stale or in the future")
             stop = _initial_stop(row, self.strategy)
             if stop is None:
                 raise ValueError("strategy_stop_unavailable")
@@ -890,14 +911,18 @@ class SwapRunner:
         account["available_usdt"] = max(account["available_usdt"] - cost, 0)
         return used_margin
 
-    def _approval_ids(self):
+    def _approval_requests(self):
         try:
             with self.approval_store.lock():
                 data = self.approval_store.load() or {"version": 1, "approvals": []}
                 approvals = data.get("approvals", [])
                 if not isinstance(approvals, list):
                     raise ValueError("invalid entry approval queue")
-                return [str(item) for item in approvals]
+                return [
+                    item
+                    for item in approvals
+                    if isinstance(item, dict) and item.get("id")
+                ]
         except RuntimeError:
             return []
 
@@ -906,9 +931,9 @@ class SwapRunner:
             with self.approval_store.lock():
                 data = self.approval_store.load() or {"version": 1, "approvals": []}
                 approvals = [
-                    str(item)
+                    item
                     for item in data.get("approvals", [])
-                    if str(item) != candidate_id
+                    if not isinstance(item, dict) or str(item.get("id")) != candidate_id
                 ]
                 self.approval_store.save({"version": 1, "approvals": approvals})
         except RuntimeError:
@@ -916,139 +941,164 @@ class SwapRunner:
 
     def _process_entry_approvals(self, account, budget, used_margin, stop_requested):
         self._expire_candidates()
-        approvals = self._approval_ids()
+        approvals = self._approval_requests()
         if not approvals:
             return used_margin
 
-        by_id = {candidate["id"]: candidate for candidate in self.entry_candidates.values()}
-        for candidate_id in approvals:
-            if stop_requested():
-                return used_margin
-            candidate = by_id.get(candidate_id)
-            if candidate is None:
-                self._ack_approval(candidate_id)
-                continue
-            market = candidate["instrument"]
-            item = self.state["markets"].get(market)
-            instrument = self.instruments.get(market)
-            if item is None or instrument is None or item["position"] is not None:
-                self._ack_approval(candidate_id)
-                self._remove_candidate(market)
-                continue
-            if candidate["expires_at"] <= self.client.now():
-                self.store.event(
-                    "entry_approval_rejected",
-                    instrument=market,
-                    candidate_id=candidate_id,
-                    reason="signal_expired",
-                )
-                self._ack_approval(candidate_id)
-                self._remove_candidate(market)
-                continue
-
-            stop = float(candidate["stop"])
-            try:
-                bid, ask = self.quote(market)
-            except MarketUnavailable as exc:
-                self.store.event(
-                    "entry_approval_rejected",
-                    instrument=market,
-                    candidate_id=candidate_id,
-                    reason=str(exc),
-                )
-                self._ack_approval(candidate_id)
-                continue
-            if bid <= stop:
-                self.store.event(
-                    "entry_approval_rejected",
-                    instrument=market,
-                    candidate_id=candidate_id,
-                    reason="price_crossed_stop",
-                )
-                self._ack_approval(candidate_id)
-                self._remove_candidate(market)
-                continue
-
-            limit = rounded(
-                ask * (1 + self.config.max_entry_slippage_bps / 10000),
-                instrument.tick,
-            )
-            market_budget = budget / len(self.instruments)
-            quantity = size_contracts(
-                instrument,
-                price=float(limit),
-                stop=stop,
-                market_budget=market_budget,
-                total_budget=budget,
-                available=account["available_usdt"],
-                used_margin=used_margin,
-                position=None,
-                strategy=self.strategy,
-                fee_rate=self.fees[market],
-                leverage=self.config.leverage,
-            )
-            if quantity == 0:
-                self.store.event(
-                    "entry_approval_rejected",
-                    instrument=market,
-                    candidate_id=candidate_id,
-                    reason="below_minimum_or_budget",
-                )
-                self._ack_approval(candidate_id)
-                self._remove_candidate(market)
-                continue
-
-            self.reconcile(market)
-            if item["position"] is not None:
-                self._ack_approval(candidate_id)
-                self._remove_candidate(market)
-                continue
-
-            stop_id = "ts" + uuid.uuid4().hex[:28]
-            risk_budget = market_budget * self.strategy.risk_per_trade
+        request = approvals[0]
+        candidate_id = str(request["id"])
+        for extra in approvals[1:]:
+            extra_id = str(extra.get("id"))
             self.store.event(
-                "entry_approval_received",
-                instrument=market,
-                candidate_id=candidate_id,
-                contracts=number(quantity),
+                "entry_approval_rejected",
+                candidate_id=extra_id,
+                reason="concurrent_approval_discarded",
             )
-            self._order(
-                market,
-                {
-                    "tdMode": "isolated",
-                    "posSide": "net",
-                    "side": "buy",
-                    "ordType": "fok",
-                    "sz": number(quantity),
-                    "px": number(limit),
-                    "attachAlgoOrds": [
-                        {
-                            "attachAlgoClOrdId": stop_id,
-                            "slTriggerPx": number(stop),
-                            "slOrdPx": "-1",
-                            "slTriggerPxType": "last",
-                        }
-                    ],
-                },
-                {
-                    "kind": "entry",
-                    "stop": stop,
-                    "stop_id": stop_id,
-                    "market_budget": market_budget,
-                    "risk_budget": risk_budget,
-                },
+            self._ack_approval(extra_id)
+
+        if stop_requested():
+            return used_margin
+        if float(request.get("expires_at", 0)) <= self.client.now():
+            self.store.event(
+                "entry_approval_rejected",
+                candidate_id=candidate_id,
+                reason="command_expired",
             )
             self._ack_approval(candidate_id)
-            if item["position"] is not None:
-                item["last_bar"] = candidate["bar"]
-                self.save()
-                self._remove_candidate(market)
+            return used_margin
 
-            cost = float(quantity * instrument.contract_value * limit) * (
-                1 / self.config.leverage + 2 * self.fees[market]
+        by_id = {candidate["id"]: candidate for candidate in self.entry_candidates.values()}
+        candidate = by_id.get(candidate_id)
+        if candidate is None:
+            self._ack_approval(candidate_id)
+            return used_margin
+
+        market = candidate["instrument"]
+        item = self.state["markets"].get(market)
+        instrument = self.instruments.get(market)
+        if item is None or instrument is None or item["position"] is not None:
+            self._ack_approval(candidate_id)
+            self._remove_candidate(market)
+            return used_margin
+        if candidate["expires_at"] <= self.client.now():
+            self.store.event(
+                "entry_approval_rejected",
+                instrument=market,
+                candidate_id=candidate_id,
+                reason="signal_expired",
             )
-            used_margin += cost
-            account["available_usdt"] = max(account["available_usdt"] - cost, 0)
+            self._ack_approval(candidate_id)
+            self._remove_candidate(market)
+            return used_margin
+
+        stop = float(candidate["stop"])
+        try:
+            bid, ask = self.quote(market)
+        except (MarketUnavailable, TransientRead) as exc:
+            self.store.event(
+                "entry_approval_rejected",
+                instrument=market,
+                candidate_id=candidate_id,
+                reason=str(exc),
+            )
+            self._ack_approval(candidate_id)
+            return used_margin
+        if bid <= stop:
+            self.store.event(
+                "entry_approval_rejected",
+                instrument=market,
+                candidate_id=candidate_id,
+                reason="price_crossed_stop",
+            )
+            self._ack_approval(candidate_id)
+            self._remove_candidate(market)
+            return used_margin
+
+        limit = rounded(
+            ask * (1 + self.config.max_entry_slippage_bps / 10000),
+            instrument.tick,
+        )
+        if float(limit) < ask:
+            self._ack_approval(candidate_id)
+            return used_margin
+        market_budget = budget / len(self.instruments)
+        quantity = size_contracts(
+            instrument,
+            price=float(limit),
+            stop=stop,
+            market_budget=market_budget,
+            total_budget=budget,
+            available=account["available_usdt"],
+            used_margin=used_margin,
+            position=None,
+            strategy=self.strategy,
+            fee_rate=self.fees[market],
+            leverage=self.config.leverage,
+        )
+        if quantity == 0:
+            self.store.event(
+                "entry_approval_rejected",
+                instrument=market,
+                candidate_id=candidate_id,
+                reason="below_minimum_or_budget",
+            )
+            self._ack_approval(candidate_id)
+            self._remove_candidate(market)
+            return used_margin
+
+        self.reconcile(market)
+        if item["position"] is not None:
+            self._ack_approval(candidate_id)
+            self._remove_candidate(market)
+            return used_margin
+        if stop_requested():
+            return used_margin
+
+        stop_id = "ts" + uuid.uuid4().hex[:28]
+        risk_budget = market_budget * self.strategy.risk_per_trade
+        self.store.event(
+            "entry_approval_received",
+            instrument=market,
+            candidate_id=candidate_id,
+            contracts=number(quantity),
+        )
+        self._order(
+            market,
+            {
+                "tdMode": "isolated",
+                "posSide": "net",
+                "side": "buy",
+                "ordType": "fok",
+                "sz": number(quantity),
+                "px": number(limit),
+                "attachAlgoOrds": [
+                    {
+                        "attachAlgoClOrdId": stop_id,
+                        "slTriggerPx": number(stop),
+                        "slOrdPx": "-1",
+                        "slTriggerPxType": "last",
+                    }
+                ],
+            },
+            {
+                "kind": "entry",
+                "stop": stop,
+                "stop_id": stop_id,
+                "market_budget": market_budget,
+                "risk_budget": risk_budget,
+            },
+        )
+        self._ack_approval(candidate_id)
+        if item["position"] is not None:
+            item["last_bar"] = candidate["bar"]
+            self.save()
+            self._remove_candidate(market)
+
+        cost = float(quantity * instrument.contract_value * limit) * (
+            1 / self.config.leverage + 2 * self.fees[market]
+        )
+        used_margin += cost
+        account["available_usdt"] = max(account["available_usdt"] - cost, 0)
         return used_margin
 
     def _order(self, market: str, payload: dict, context: dict):
