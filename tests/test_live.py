@@ -574,7 +574,6 @@ def test_candidate_scan_only_filters_strategy_without_execution_reads(runner, mo
 
 def test_candidate_scan_fetches_candles_concurrently_and_persists_once(runner, monkeypatch):
     import threading
-    from dataclasses import replace
 
     from trend_pyramiding import live
 
