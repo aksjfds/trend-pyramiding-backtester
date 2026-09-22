@@ -512,6 +512,15 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
         controller.approve_entry("live", "missing")
 
 
+def test_candidate_api_preserves_worker_volume_order(controller):
+    candidates = [
+        {"id": "eth", "instrument": "ETH-USDT-SWAP"},
+        {"id": "btc", "instrument": "BTC-USDT-SWAP"},
+    ]
+    controller.candidate_store(False).save({"version": 1, "candidates": candidates})
+    assert controller.entry_candidates(False) == candidates
+
+
 def test_manual_entry_approval_rejected_in_readonly_mode(controller):
     from types import SimpleNamespace
 
