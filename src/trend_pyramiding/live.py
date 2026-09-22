@@ -963,18 +963,8 @@ class SwapRunner:
         if stop_requested():
             return used_margin
 
-        try:
-            instrument = self._ensure_managed_market(market)
-            item = self.state["markets"][market]
-        except (ValueError, TransientRead, OKXError) as exc:
-            self.store.event(
-                "manual_entry_rejected",
-                request_id=request_id,
-                instrument=market,
-                reason=str(exc),
-            )
-            return used_margin
-        if item["position"] is not None:
+        item = self.state["markets"].get(market)
+        if item is not None and item["position"] is not None:
             self.store.event(
                 "manual_entry_rejected",
                 request_id=request_id,
@@ -984,6 +974,12 @@ class SwapRunner:
             return used_margin
 
         try:
+            instrument = self.instruments.get(market) or self._supported_catalog().get(market)
+            if instrument is None:
+                raise ValueError("a configured instrument is unavailable or unsupported")
+            fee_rate = self.fees.get(market)
+            if fee_rate is None:
+                fee_rate = self._fee_rate(instrument)
             frame = closed_candles(self.client, market, self.strategy, self.config.bar)
             row = frame.iloc[-1]
             age = (
@@ -1044,7 +1040,7 @@ class SwapRunner:
             total_budget=budget,
             available=account["available_usdt"],
             used_margin=used_margin,
-            fee_rate=self.fees[market],
+            fee_rate=fee_rate,
             leverage=self.config.leverage,
         )
         if quantity == 0:
@@ -1059,7 +1055,18 @@ class SwapRunner:
             )
             return used_margin
 
-        self.reconcile(market)
+        try:
+            instrument = self._ensure_managed_market(market)
+            item = self.state["markets"][market]
+            self.reconcile(market)
+        except (ValueError, TransientRead, OKXError, RuntimeError) as exc:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=request_id,
+                instrument=market,
+                reason=str(exc),
+            )
+            return used_margin
         if item["position"] is not None or stop_requested():
             return used_margin
 
@@ -1071,7 +1078,7 @@ class SwapRunner:
             (
                 float(limit)
                 - stop
-                + self.fees[market] * (float(limit) + stop)
+                + fee_rate * (float(limit) + stop)
             )
             * base_quantity,
             0,
@@ -1119,7 +1126,7 @@ class SwapRunner:
             self._remove_candidate(market)
 
         cost = float(quantity * instrument.contract_value * limit) * (
-            1 / self.config.leverage + 2 * self.fees[market]
+            1 / self.config.leverage + 2 * fee_rate
         )
         used_margin += cost
         account["available_usdt"] = max(account["available_usdt"] - cost, 0)
