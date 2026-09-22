@@ -210,10 +210,12 @@ def test_http_page_assets_status_and_no_secret_exposure(server):
     status, headers, page = request(server, "GET", "/")
     assert status == 200 and "策略控制台" in page
     assert "资金与策略设置" not in page
-    assert 'id="capital-settings"' in page
-    assert 'id="strategy-basic-settings"' in page
-    assert 'id="advanced-settings"' in page
-    assert page.count('class="primary settings-save"') == 2
+    assert 'id="edit-capital"' in page
+    assert 'id="edit-strategy"' in page
+    assert page.count(">修改</button>") == 2
+    assert "高级策略参数" not in page
+    assert 'id="advanced-settings"' not in page
+    assert 'id="settings-form"' not in page
     assert "符合策略的币种" in page
     assert "信号收盘价" not in page
     assert "预计张数" not in page
@@ -334,6 +336,11 @@ def test_settings_http_save_refresh_and_separate_profile(server):
     state = server.controller.snapshot("watch")
     assert state["config"]["capital_fraction"] == 0.35
     assert state["config"]["leverage"] == 5 and state["config"]["bar"] == "4H"
+    assert {field["key"] for field in state["parameters"]["fields"]} == {
+        "capital_fraction",
+        "leverage",
+        "bar",
+    }
     assert state["parameters"]["values"]["strategy"]["atr_period"] == 21
     reopened = web.Controller(server.controller.config_path, server.controller.state_dir)
     assert reopened.snapshot("watch")["parameters"] == state["parameters"]
