@@ -373,14 +373,16 @@ def manual_initial_stop(row: pd.Series, strategy: BacktestConfig, entry_price: f
         else 0.0
     )
 
+    minimum_atr_mult = max(MANUAL_STOP_MIN_ATR_MULT, strategy.atr_stop_mult)
+    maximum_atr_mult = max(MANUAL_STOP_MAX_ATR_MULT, minimum_atr_mult)
     minimum_distance = max(
-        MANUAL_STOP_MIN_ATR_MULT * atr_value,
+        minimum_atr_mult * atr_value,
         MANUAL_STOP_MIN_DISTANCE_PCT * entry_price,
     )
     maximum_distance = max(
         minimum_distance,
         min(
-            MANUAL_STOP_MAX_ATR_MULT * atr_value,
+            maximum_atr_mult * atr_value,
             MANUAL_STOP_MAX_DISTANCE_PCT * entry_price,
         ),
     )
