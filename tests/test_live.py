@@ -534,20 +534,23 @@ def test_verified_protection_does_not_rewrite_unchanged_safe_state(runner, monke
     assert saves == 0
 
 
-def test_candidate_scan_reuses_instrument_and_fee_metadata_cache(runner, monkeypatch):
+def test_candidate_scan_only_filters_strategy_without_execution_reads(runner, monkeypatch):
     other = "ETH-USDT-SWAP"
     original = runner.client.get
     instrument_reads = 0
     fee_reads = 0
+    ticker_reads = 0
 
     def get(path, params=None, **kwargs):
-        nonlocal instrument_reads, fee_reads
+        nonlocal instrument_reads, fee_reads, ticker_reads
         rows = original(path, params, **kwargs)
         if path.endswith("public/instruments"):
             instrument_reads += 1
             return rows + [{**rows[0], "instId": other, "ctValCcy": "ETH"}]
         if path.endswith("trade-fee"):
             fee_reads += 1
+        if path.endswith("market/ticker"):
+            ticker_reads += 1
         return rows
 
     monkeypatch.setattr(runner.client, "get", get)
@@ -556,13 +559,17 @@ def test_candidate_scan_reuses_instrument_and_fee_metadata_cache(runner, monkeyp
 
     request_candidate_scan(runner)
     runner.step()
+    candidates = runner.candidate_store.load()["candidates"]
     assert instrument_reads == 1
-    assert fee_reads == 1
+    assert fee_reads == 0
+    assert ticker_reads == 0
+    assert all(set(item) == {"id", "instrument"} for item in candidates)
 
     request_candidate_scan(runner)
     runner.step()
     assert instrument_reads == 1
-    assert fee_reads == 1
+    assert fee_reads == 0
+    assert ticker_reads == 0
 
 
 def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, monkeypatch):
@@ -586,6 +593,7 @@ def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, mo
 
     candidates = runner.candidate_store.load()["candidates"]
     assert {item["instrument"] for item in candidates} == {MARKET, other}
+    assert all(set(item) == {"id", "instrument"} for item in candidates)
     assert other not in runner.state["markets"]
     scan_state = runner.scan_store.load()
     assert scan_state["request"] is None
@@ -968,14 +976,39 @@ def test_unknown_held_market_valuation_blocks_entries_but_maintains_stops(runner
     assert MARKET in runner.market_warnings
 
 
-def test_candidate_expires_without_automatic_rescan(runner):
+def test_candidate_list_has_no_confirmation_countdown_or_auto_rescan(runner):
     request_candidate_scan(runner)
     runner.step()
-    assert runner.candidate_store.load()["candidates"]
+    candidates = runner.candidate_store.load()["candidates"]
+    assert candidates
     runner.client.clock += 7200
     runner.step()
     assert not runner.client.orders
+    assert runner.candidate_store.load()["candidates"] == candidates
+
+
+def test_candidate_open_revalidates_latest_strategy_condition(runner, monkeypatch):
+    request_candidate_scan(runner)
+    runner.step()
+    candidate_id = approve_first_candidate(runner)
+
+    from trend_pyramiding import live
+
+    original = live.closed_candles
+
+    def no_longer_matches(*args, **kwargs):
+        frame = original(*args, **kwargs)
+        frame.loc[frame.index[-1], "signal"] = False
+        return frame
+
+    monkeypatch.setattr(live, "closed_candles", no_longer_matches)
+    runner.step()
+
+    assert not runner.client.orders
     assert runner.candidate_store.load()["candidates"] == []
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert candidate_id in events
+    assert "strategy_condition_no_longer_met" in events
 
 
 def test_event_rotation_does_not_modify_order_state(tmp_path):
