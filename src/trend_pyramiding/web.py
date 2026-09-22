@@ -583,6 +583,12 @@ class Controller:
                         }
                 except (OSError, ValueError, AttributeError):
                     pass
+            heartbeat_fresh = bool(
+                heartbeat
+                and heartbeat.get("phase") in {"ready", "degraded"}
+                and 0 <= time.time() - float(heartbeat.get("updated_at", 0))
+                <= max(30, self.config.poll_seconds * 3)
+            )
             selected = []
             try:
                 selected = list(selected_config(self.config, store).instruments)
@@ -653,8 +659,7 @@ class Controller:
                 "candidate_scan_pending": scan_pending,
                 "candidate_scan_enabled": bool(
                     running
-                    and heartbeat
-                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and heartbeat_fresh
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
@@ -664,8 +669,7 @@ class Controller:
                 ),
                 "entry_approval_enabled": bool(
                     running
-                    and heartbeat
-                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and heartbeat_fresh
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
@@ -678,8 +682,7 @@ class Controller:
                 "manual_entry_pending": manual_entry_pending,
                 "manual_entry_enabled": bool(
                     running
-                    and heartbeat
-                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and heartbeat_fresh
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
