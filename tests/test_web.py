@@ -480,12 +480,6 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
-        "bar": "2026-09-22T08:00:00+00:00",
-        "signal_close": 50.0,
-        "stop": 48.0,
-        "indicative_contracts": "1",
-        "detected_at": time.time(),
-        "expires_at": time.time() + 120,
     }
     controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
 
@@ -519,12 +513,6 @@ def test_manual_entry_approval_rejected_in_readonly_mode(controller):
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
-        "bar": "2026-09-22T08:00:00+00:00",
-        "signal_close": 50.0,
-        "stop": 48.0,
-        "indicative_contracts": "1",
-        "detected_at": time.time(),
-        "expires_at": time.time() + 120,
     }
     controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
     with pytest.raises(ValueError, match="只读"):
@@ -739,12 +727,6 @@ def test_manual_actions_are_mutually_exclusive(controller):
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
-        "bar": "2026-09-22T08:00:00+00:00",
-        "signal_close": 50.0,
-        "stop": 48.0,
-        "indicative_contracts": "1",
-        "detected_at": time.time(),
-        "expires_at": time.time() + 120,
     }
     controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
 
