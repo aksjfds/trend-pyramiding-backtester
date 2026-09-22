@@ -28,7 +28,10 @@ from .okx import (
     rounded,
     universe,
 )
+from .runtime import safe_console_print
 from .signals import breakout_long_signal
+
+CONTROL_COMMAND_TTL_SECONDS = 30
 
 BAR_SECONDS = {
     "15m": 900,
@@ -202,7 +205,7 @@ class StateStore:
         record = {"time": pd.Timestamp.now(tz="UTC").isoformat(), "event": event, **details}
         with path.open("a") as handle:
             handle.write(json.dumps(record, allow_nan=False) + "\n")
-        print(json.dumps(record, ensure_ascii=False), flush=True)
+        safe_console_print(json.dumps(record, ensure_ascii=False), flush=True)
 
 
 def account_snapshot(client: OKXClient, *, for_trading=True) -> dict:
