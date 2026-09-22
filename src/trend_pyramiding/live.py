@@ -1365,6 +1365,19 @@ class SwapRunner:
             self.store.event("market_deferred", instrument=market, detail=detail)
         self.market_warnings[market] = detail
 
+    def _recover_flat_market_warnings(self):
+        for market in list(self.market_warnings):
+            item = self.state["markets"].get(market)
+            if item is None or item.get("position") is not None:
+                continue
+            try:
+                closed_candles(self.client, market, self.strategy, self.config.bar)
+                self.quote(market)
+            except (MarketUnavailable, TransientRead):
+                continue
+            self.market_warnings.pop(market, None)
+            self.store.event("market_recovered", instrument=market)
+
     def step(self, stop_requested=lambda: False):
         if self.state["pending"]:
             self.finish_order()
@@ -1405,6 +1418,7 @@ class SwapRunner:
             account, budget, used_margin, stop_requested
         )
         self._process_candidate_scan(account, budget, used_margin, stop_requested)
+        self._recover_flat_market_warnings()
 
         # New candles never create first-entry candidates automatically. The normal
         # loop below only manages positions that already exist.
