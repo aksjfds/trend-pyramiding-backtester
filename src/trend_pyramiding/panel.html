@@ -43,9 +43,10 @@
 <div class="actions"><button id="save-selection" class="primary" disabled>保存币种选择</button><button id="reload-markets" class="secondary">刷新币种</button></div>
 <p id="selection-feedback" class="hint" role="status"></p>
 </section>
-<section class="card entry-candidates" id="entry-candidates"><div class="section-heading"><div><h2>待确认开仓</h2><p class="hint">只有点击“生成候选”时，策略才扫描当前选中的全部币种。新 K 线出现不会自动扫描；确认开仓后，后续加仓、止损和退出继续由策略自动管理。</p></div><div class="candidate-tools"><span class="tag" id="candidate-count">0 个候选</span><button type="button" class="secondary candidate-generate" id="generate-candidates">生成候选</button></div></div>
+<section class="card entry-candidates" id="entry-candidates"><div class="section-heading"><div><h2>开仓控制</h2><p class="hint">候选币可直接确认开仓；也可以从当前策略管理的空仓币种中指定一个手动开仓。任何首仓成交后，后续加仓、止损和退出都由策略自动接管。</p></div><div class="candidate-tools"><span class="tag" id="candidate-count">0 个候选</span><button type="button" class="secondary candidate-generate" id="generate-candidates">生成候选</button></div></div>
+<div class="manual-entry-box"><label for="manual-entry-instrument">指定币种开仓</label><div class="manual-entry-row"><select id="manual-entry-instrument"><option value="">选择当前管理币种</option></select><button type="button" class="primary" id="manual-entry-submit">开仓并交给策略接管</button></div><p class="hint" id="manual-entry-note">仅可选择当前运行策略已经管理、且目前没有持仓的币种。程序会按最新已收盘 K 线计算策略初始止损和张数。</p></div>
 <div class="table-scroll"><table><thead><tr><th>永续合约</th><th>信号 K 线</th><th>信号收盘价</th><th>初始止损</th><th>预计张数</th><th>剩余确认时间</th><th>操作</th></tr></thead><tbody id="candidate-body"></tbody></table></div>
-<div class="empty" id="empty-candidates"><div class="empty-icon">◎</div><strong>当前没有开仓候选</strong><p>等待下一根 K 线收盘后重新扫描。</p></div>
+<div class="empty" id="empty-candidates"><div class="empty-icon">◎</div><strong>当前没有开仓候选</strong><p>需要时点击“生成候选”；新 K 线不会自动扫描。</p></div>
 <p id="candidate-feedback" class="hint" role="status"></p></section>
 <section class="card positions" id="positions"><div class="section-heading"><div><h2>持仓与止损</h2><p class="hint">策略保存的记录；停止后可能与交易所持仓不同。</p></div><span class="tag" id="market-count">待选择币对</span></div>
 <div class="table-scroll"><table><thead><tr><th>永续合约</th><th>持仓张数</th><th>平均入场价</th><th>当前止损价</th><th>加仓档数</th><th>最近处理 K 线</th></tr></thead><tbody id="market-body"></tbody></table></div>
