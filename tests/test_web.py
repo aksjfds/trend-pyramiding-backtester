@@ -464,6 +464,12 @@ def test_worker_stays_in_foreground_terminal_session(controller, monkeypatch):
     assert seen["stderr"] is web.subprocess.STDOUT
 
 
+def mark_worker_ready(controller, pid=12345):
+    controller.heartbeat.write_text(
+        json.dumps({"pid": pid, "updated_at": time.time(), "phase": "ready"})
+    )
+
+
 def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     from types import SimpleNamespace
 
@@ -473,6 +479,7 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
         wait=lambda: 0,
     )
     controller.mode = "live"
+    mark_worker_ready(controller)
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
@@ -550,6 +557,7 @@ def test_manual_candidate_scan_request_is_queued_only_in_trading_mode(controller
         wait=lambda: 0,
     )
     controller.mode = "live"
+    mark_worker_ready(controller)
 
     controller.request_candidate_scan("live")
     queued = controller.candidate_scan_store(False).load()
