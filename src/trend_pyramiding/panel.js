@@ -356,7 +356,7 @@ async function refreshNetwork() {
 async function refresh() {
   if (loading) return; loading=true;
   try { const s=await api('/api/status?mode='+encodeURIComponent($('mode').value)); connected=true; $('connection').textContent='服务已连接 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}); render(s);
-    if (s.credentials[s.profile] && !s.checking && !checkBusy && Date.now() - Math.max(accountAttempts[s.profile] || 0, (s.account?.time || 0)*1000, (s.account?.error_time || 0)*1000) > 60000) void checkAccount();
+    if (s.credentials[s.profile] && !s.checking && !checkBusy && Date.now() - Math.max(accountAttempts[s.profile] || 0, (s.account?.time || 0)*1000, (s.account?.error_time || 0)*1000) > 10000) void checkAccount();
     if (catalogProfile !== s.profile && !catalogLoading) void loadInstrumentCatalog();
   }
   catch(error) {connected=false; $('connection').textContent='连接中断 · 请检查网页服务'; message(error.message); controls();}
