@@ -92,8 +92,9 @@ def test_authenticated_page_and_status_do_not_start_or_expose_secrets(app):
     page = request(app)
     assert page.code == 200 and "Render 运行" in page.body
     assert "资金与策略设置" not in page.body
-    assert 'id="capital-settings"' in page.body
-    assert 'id="strategy-basic-settings"' in page.body
+    assert 'id="edit-capital"' in page.body
+    assert 'id="edit-strategy"' in page.body
+    assert "高级策略参数" not in page.body
     assert app.token in page.body and PASSWORD not in page.body
     assert page.headers["Cache-Control"] == "no-store"
     assert request(app, "/panel.js").code == 200
