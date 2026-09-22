@@ -597,6 +597,21 @@ def test_manual_candidate_scan_request_is_queued_only_in_trading_mode(controller
     with pytest.raises(ValueError, match="已提交"):
         controller.request_candidate_scan("live")
 
+    controller.candidate_scan_store(False).save(
+        {
+            "version": 1,
+            "request": None,
+            "active": {
+                "id": "active-scan",
+                "requested_at": time.time(),
+                "expires_at": time.time() + 30,
+            },
+        }
+    )
+    assert controller.snapshot("live")["candidate_scan_pending"] is True
+    with pytest.raises(ValueError, match="已提交"):
+        controller.request_candidate_scan("live")
+
     controller.mode = "watch"
     controller.candidate_scan_store(False).save({"version": 1, "request": None})
     with pytest.raises(ValueError, match="只读"):
@@ -648,15 +663,19 @@ def test_specified_instrument_manual_entry_is_queued_for_managed_flat_coin(contr
     assert state["manual_entry_enabled"] is True
     assert state["manual_entry_instruments"] == ["HYPE-USDT-SWAP"]
 
-    controller.request_manual_entry("live", "HYPE-USDT-SWAP")
+    controller.request_manual_entry("live", "HYPE-USDT-SWAP", 0.20)
     queued = controller.manual_entry_store(False).load()["request"]
     assert queued["instrument"] == "HYPE-USDT-SWAP"
+    assert queued["capital_fraction"] == pytest.approx(0.20)
     assert queued["id"]
     assert queued["expires_at"] > queued["requested_at"]
     assert controller.snapshot("live")["manual_entry_pending"] is True
 
-    with pytest.raises(ValueError, match="管理列表"):
-        controller.request_manual_entry("live", "ETH-USDT-SWAP")
+    controller.manual_entry_store(False).save({"version": 1, "request": None})
+    controller.request_manual_entry("live", "ETH-USDT-SWAP", 0.35)
+    queued = controller.manual_entry_store(False).load()["request"]
+    assert queued["instrument"] == "ETH-USDT-SWAP"
+    assert queued["capital_fraction"] == pytest.approx(0.35)
 
 
 def test_specified_instrument_manual_entry_rejects_existing_position(controller):
@@ -680,7 +699,7 @@ def test_specified_instrument_manual_entry_rejects_existing_position(controller)
         }
     )
     with pytest.raises(ValueError, match="已经有策略持仓"):
-        controller.request_manual_entry("live", "HYPE-USDT-SWAP")
+        controller.request_manual_entry("live", "HYPE-USDT-SWAP", 0.20)
 
 
 def test_manual_entry_http_endpoint(server, monkeypatch):
@@ -688,18 +707,24 @@ def test_manual_entry_http_endpoint(server, monkeypatch):
     monkeypatch.setattr(
         server.controller,
         "request_manual_entry",
-        lambda mode, instrument: calls.append((mode, instrument)),
+        lambda mode, instrument, capital_fraction: calls.append(
+            (mode, instrument, capital_fraction)
+        ),
     )
     headers = {"X-Panel-Token": server.token, "Origin": server.origin}
     status, _, body = request(
         server,
         "POST",
         "/api/manual-entry",
-        {"mode": "live", "instrument": "HYPE-USDT-SWAP"},
+        {
+            "mode": "live",
+            "instrument": "HYPE-USDT-SWAP",
+            "capital_fraction": 0.25,
+        },
         **headers,
     )
     assert status == 200 and json.loads(body)["ok"] is True
-    assert calls == [("live", "HYPE-USDT-SWAP")]
+    assert calls == [("live", "HYPE-USDT-SWAP", 0.25)]
 
 
 def test_stale_heartbeat_disables_and_rejects_manual_trading_controls(controller):
@@ -720,7 +745,7 @@ def test_stale_heartbeat_disables_and_rejects_manual_trading_controls(controller
     assert snapshot["entry_approval_enabled"] is False
     assert snapshot["manual_entry_enabled"] is False
     with pytest.raises(ValueError, match="心跳"):
-        controller.request_manual_entry("live", "HYPE-USDT-SWAP")
+        controller.request_manual_entry("live", "HYPE-USDT-SWAP", 0.20)
 
 
 def test_manual_actions_are_mutually_exclusive(controller):
@@ -754,4 +779,4 @@ def test_manual_actions_are_mutually_exclusive(controller):
     controller.candidate_scan_store(False).save({"version": 1, "request": None})
     controller.approve_entry("live", "candidate-1")
     with pytest.raises(ValueError, match="候选开仓"):
-        controller.request_manual_entry("live", "HYPE-USDT-SWAP")
+        controller.request_manual_entry("live", "HYPE-USDT-SWAP", 0.20)
