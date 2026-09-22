@@ -26,6 +26,7 @@ from .okx import (
     dec,
     number,
     rounded,
+    supported_instruments,
     universe,
 )
 from .runtime import safe_console_print
@@ -376,6 +377,36 @@ def size_contracts(
     return contracts if contracts >= instrument.minimum else dec(0)
 
 
+def manual_size_contracts(
+    instrument: Instrument,
+    *,
+    price: float,
+    capital_budget: float,
+    total_budget: float,
+    available: float,
+    used_margin: float,
+    fee_rate: float,
+    leverage: int = 2,
+):
+    """Size a user-directed first entry from the selected capital fraction."""
+    if price <= 0 or leverage <= 0:
+        return dec(0)
+    selected_budget = min(
+        max(capital_budget, 0),
+        max(total_budget - used_margin, 0),
+        max(available, 0),
+    )
+    if selected_budget <= 0:
+        return dec(0)
+    cost_per_base = price / leverage + 2 * fee_rate * price
+    if cost_per_base <= 0:
+        return dec(0)
+    base_qty = selected_budget / cost_per_base
+    contracts = rounded(dec(base_qty) / instrument.contract_value, instrument.lot)
+    contracts = min(contracts, rounded(instrument.max_size, instrument.lot))
+    return contracts if contracts >= instrument.minimum else dec(0)
+
+
 class SwapRunner:
     def __init__(
         self, client: OKXClient, config: LiveConfig, strategy: BacktestConfig, store: StateStore
@@ -386,6 +417,7 @@ class SwapRunner:
         self.fees = {}
         self.market_warnings = {}
         self.stop_requested = lambda: False
+        self.keepalive = lambda: None
         self.entry_candidates = {}
         self.candidate_store = StateStore(self.store.path.with_suffix(".candidates.json"))
         self.approval_store = StateStore(self.store.path.with_suffix(".entry-approvals.json"))
@@ -394,6 +426,37 @@ class SwapRunner:
 
     def save(self):
         self.store.save(self.state)
+
+    def _ensure_managed_market(self, market: str) -> Instrument:
+        existing = self.instruments.get(market)
+        if existing is not None:
+            return existing
+        instrument = universe(self.client, 1, (market,))[0]
+        if self.actual_position(market) != 0:
+            raise ValueError("unexpected_existing_position")
+        self.client.post(
+            "/api/v5/account/set-leverage",
+            {
+                "instId": instrument.inst_id,
+                "lever": str(self.config.leverage),
+                "mgnMode": "isolated",
+            },
+        )
+        info = self.client.get(
+            "/api/v5/account/leverage-info",
+            {"instId": instrument.inst_id, "mgnMode": "isolated"},
+        )
+        if not info or any(dec(x["lever"]) != self.config.leverage for x in info):
+            raise ValueError("configured isolated leverage verification failed")
+        fee_rate = max(
+            taker_fee(self.client, instrument), self.strategy.fee_bps / 10000
+        )
+        self.instruments[market] = instrument
+        self.fees[market] = fee_rate
+        self.state["markets"][market] = {"last_bar": None, "position": None}
+        self.save()
+        self.store.event("market_adopted", instrument=market)
+        return instrument
 
     def initialize(self):
         self.client.sync_time()
@@ -628,20 +691,32 @@ class SwapRunner:
     def _take_scan_request(self):
         try:
             with self.scan_store.lock():
-                data = self.scan_store.load() or {"version": 1, "request": None}
+                data = self.scan_store.load() or {"version": 1, "request": None, "active": None}
                 request = data.get("request")
-                self.scan_store.save({"version": 1, "request": None})
+                if not isinstance(request, dict) or not request.get("id"):
+                    return None
+                if float(request.get("expires_at", 0)) <= time.time():
+                    self.scan_store.save({"version": 1, "request": None, "active": None})
+                    self.store.event(
+                        "candidate_scan_expired",
+                        request_id=str(request["id"]),
+                    )
+                    return None
+                self.scan_store.save({"version": 1, "request": None, "active": request})
+                return request
         except RuntimeError:
             return None
-        if not isinstance(request, dict) or not request.get("id"):
-            return None
-        if float(request.get("expires_at", 0)) <= time.time():
-            self.store.event(
-                "candidate_scan_expired",
-                request_id=str(request["id"]),
-            )
-            return None
-        return request
+
+    def _finish_scan_request(self, request_id: str):
+        try:
+            with self.scan_store.lock():
+                data = self.scan_store.load() or {"version": 1, "request": None, "active": None}
+                active = data.get("active")
+                if isinstance(active, dict) and str(active.get("id")) == request_id:
+                    data["active"] = None
+                    self.scan_store.save(data)
+        except RuntimeError:
+            pass
 
     def _process_candidate_scan(self, account, budget, used_margin, stop_requested):
         request = self._take_scan_request()
@@ -652,93 +727,106 @@ class SwapRunner:
         self._save_candidates()
         request_id = str(request["id"])
         checked = 0
+        skipped = 0
         found = 0
-        self.store.event(
-            "candidate_scan_started",
-            request_id=request_id,
-            instruments=list(self.instruments),
-        )
-
-        for market, instrument in self.instruments.items():
-            if stop_requested():
-                return
-            item = self.state["markets"][market]
-            if item["position"] is not None:
-                continue
-            try:
-                frame = closed_candles(self.client, market, self.strategy, self.config.bar)
-                self.quote(market)
-            except (MarketUnavailable, TransientRead) as exc:
-                self.market_warning(market, exc)
-                continue
-
-            row = frame.iloc[-1]
-            bar = row["timestamp"].isoformat()
-            age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
-            if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
-                self.market_warning(market, "latest confirmed candle is stale or in the future")
-                continue
-            if self.market_warnings.pop(market, None):
-                self.store.event("market_recovered", instrument=market)
-
-            checked += 1
-            stop = _initial_stop(row, self.strategy)
-            if not bool(row["signal"]) or stop is None:
-                continue
-            stop = float(rounded(stop, instrument.tick))
-            try:
-                bid, ask = self.quote(market)
-            except (MarketUnavailable, TransientRead) as exc:
-                self.market_warning(market, exc)
-                continue
-            if bid <= stop:
-                continue
-
-            limit = rounded(
-                ask * (1 + self.config.max_entry_slippage_bps / 10000),
-                instrument.tick,
+        try:
+            scan_instruments = supported_instruments(self.client)
+            self.store.event(
+                "candidate_scan_started",
+                request_id=request_id,
+                total_markets=len(scan_instruments),
+                instruments="all_supported_usdt_swaps",
             )
-            if float(limit) < ask:
-                continue
-            market_budget = budget / len(self.instruments)
-            quantity = size_contracts(
-                instrument,
-                price=float(limit),
-                stop=stop,
-                market_budget=market_budget,
-                total_budget=budget,
-                available=account["available_usdt"],
-                used_margin=used_margin,
-                position=None,
-                strategy=self.strategy,
-                fee_rate=self.fees[market],
-                leverage=self.config.leverage,
-            )
-            if quantity == 0:
-                continue
 
-            next_bar_close = (
-                row["timestamp"].timestamp() + 2 * BAR_SECONDS[self.config.bar]
-            )
-            self._publish_candidate(
-                market,
-                bar=bar,
-                close=float(row["close"]),
-                stop=stop,
-                contracts=quantity,
-                expires_at=min(
-                    self.client.now() + self.config.max_signal_age_seconds,
-                    next_bar_close,
-                ),
-            )
-            found += 1
+            for instrument in scan_instruments:
+                self.keepalive()
+                if stop_requested():
+                    return
+                market = instrument.inst_id
+                item = self.state["markets"].get(market)
+                if item is not None and item["position"] is not None:
+                    skipped += 1
+                    continue
+                try:
+                    frame = closed_candles(self.client, market, self.strategy, self.config.bar)
+                except (MarketUnavailable, TransientRead, ValueError):
+                    skipped += 1
+                    continue
 
-        self.store.event(
-            "candidate_scan_completed",
-            request_id=request_id,
-            checked_markets=checked,
-            candidates=found,
-        )
+                row = frame.iloc[-1]
+                bar = row["timestamp"].isoformat()
+                age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
+                if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
+                    skipped += 1
+                    continue
+
+                checked += 1
+                stop = _initial_stop(row, self.strategy)
+                if not bool(row["signal"]) or stop is None:
+                    continue
+                stop = float(rounded(stop, instrument.tick))
+                try:
+                    bid, ask = self.quote(market)
+                    fee_rate = self.fees.get(market)
+                    if fee_rate is None:
+                        fee_rate = max(
+                            taker_fee(self.client, instrument),
+                            self.strategy.fee_bps / 10000,
+                        )
+                except (MarketUnavailable, TransientRead, ValueError, OKXError):
+                    skipped += 1
+                    continue
+                if bid <= stop:
+                    continue
+
+                limit = rounded(
+                    ask * (1 + self.config.max_entry_slippage_bps / 10000),
+                    instrument.tick,
+                )
+                if float(limit) < ask:
+                    continue
+                quantity = size_contracts(
+                    instrument,
+                    price=float(limit),
+                    stop=stop,
+                    market_budget=budget,
+                    total_budget=budget,
+                    available=account["available_usdt"],
+                    used_margin=used_margin,
+                    position=None,
+                    strategy=self.strategy,
+                    fee_rate=fee_rate,
+                    leverage=self.config.leverage,
+                )
+                if quantity == 0:
+                    continue
+
+                next_bar_close = (
+                    row["timestamp"].timestamp() + 2 * BAR_SECONDS[self.config.bar]
+                )
+                self._publish_candidate(
+                    market,
+                    bar=bar,
+                    close=float(row["close"]),
+                    stop=stop,
+                    contracts=quantity,
+                    expires_at=min(
+                        self.client.now() + self.config.max_signal_age_seconds,
+                        next_bar_close,
+                    ),
+                )
+                found += 1
+
+            self.store.event(
+                "candidate_scan_completed",
+                request_id=request_id,
+                total_markets=len(scan_instruments),
+                checked_markets=checked,
+                skipped_markets=skipped,
+                candidates=found,
+            )
+        finally:
+            self._finish_scan_request(request_id)
 
     def _take_manual_entry_request(self):
         try:
@@ -758,6 +846,15 @@ class SwapRunner:
                 reason="command_expired",
             )
             return None
+        fraction = request.get("capital_fraction")
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=str(request["id"]),
+                instrument=str(request["instrument"]),
+                reason="invalid_capital_fraction",
+            )
+            return None
         return request
 
     def _process_manual_entry_request(
@@ -769,14 +866,19 @@ class SwapRunner:
 
         request_id = str(request["id"])
         market = str(request["instrument"])
-        item = self.state["markets"].get(market)
-        instrument = self.instruments.get(market)
-        if item is None or instrument is None:
+        capital_fraction = float(request["capital_fraction"])
+        if stop_requested():
+            return used_margin
+
+        try:
+            instrument = self._ensure_managed_market(market)
+            item = self.state["markets"][market]
+        except (ValueError, TransientRead, OKXError) as exc:
             self.store.event(
                 "manual_entry_rejected",
                 request_id=request_id,
                 instrument=market,
-                reason="instrument_not_managed",
+                reason=str(exc),
             )
             return used_margin
         if item["position"] is not None:
@@ -786,8 +888,6 @@ class SwapRunner:
                 instrument=market,
                 reason="position_already_exists",
             )
-            return used_margin
-        if stop_requested():
             return used_margin
 
         try:
@@ -836,17 +936,18 @@ class SwapRunner:
             )
             return used_margin
 
-        market_budget = budget / len(self.instruments)
-        quantity = size_contracts(
+        selected_budget = min(
+            budget * capital_fraction,
+            max(budget - used_margin, 0),
+            max(account["available_usdt"], 0),
+        )
+        quantity = manual_size_contracts(
             instrument,
             price=float(limit),
-            stop=stop,
-            market_budget=market_budget,
+            capital_budget=budget * capital_fraction,
             total_budget=budget,
             available=account["available_usdt"],
             used_margin=used_margin,
-            position=None,
-            strategy=self.strategy,
             fee_rate=self.fees[market],
             leverage=self.config.leverage,
         )
@@ -856,6 +957,9 @@ class SwapRunner:
                 request_id=request_id,
                 instrument=market,
                 reason="below_minimum_or_budget",
+                capital_fraction=capital_fraction,
+                selected_budget=selected_budget,
+                minimum_contracts=number(instrument.minimum),
             )
             return used_margin
 
@@ -864,12 +968,26 @@ class SwapRunner:
             return used_margin
 
         stop_id = "ts" + uuid.uuid4().hex[:28]
-        risk_budget = market_budget * self.strategy.risk_per_trade
+        first_allocation = self.strategy.allocation_weights[0]
+        market_budget = min(budget, selected_budget / first_allocation)
+        base_quantity = float(quantity * instrument.contract_value)
+        initial_risk = max(
+            (
+                float(limit)
+                - stop
+                + self.fees[market] * (float(limit) + stop)
+            )
+            * base_quantity,
+            0,
+        )
+        risk_budget = initial_risk / self.strategy.risk_weights[0]
         self.store.event(
             "manual_entry_received",
             request_id=request_id,
             instrument=market,
             contracts=number(quantity),
+            capital_fraction=capital_fraction,
+            selected_budget=selected_budget,
             bar=row["timestamp"].isoformat(),
             stop=stop,
         )
@@ -974,9 +1092,20 @@ class SwapRunner:
             return used_margin
 
         market = candidate["instrument"]
-        item = self.state["markets"].get(market)
-        instrument = self.instruments.get(market)
-        if item is None or instrument is None or item["position"] is not None:
+        try:
+            instrument = self._ensure_managed_market(market)
+            item = self.state["markets"][market]
+        except (ValueError, TransientRead, OKXError) as exc:
+            self.store.event(
+                "entry_approval_rejected",
+                instrument=market,
+                candidate_id=candidate_id,
+                reason=str(exc),
+            )
+            self._ack_approval(candidate_id)
+            self._remove_candidate(market)
+            return used_margin
+        if item["position"] is not None:
             self._ack_approval(candidate_id)
             self._remove_candidate(market)
             return used_margin
@@ -1021,7 +1150,7 @@ class SwapRunner:
         if float(limit) < ask:
             self._ack_approval(candidate_id)
             return used_margin
-        market_budget = budget / len(self.instruments)
+        market_budget = budget
         quantity = size_contracts(
             instrument,
             price=float(limit),
