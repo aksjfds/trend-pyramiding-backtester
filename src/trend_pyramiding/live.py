@@ -464,6 +464,12 @@ class SwapRunner:
                 "markets": {i.inst_id: {"last_bar": None, "position": None} for i in selected},
             }
             self.save()
+        else:
+            if self.state["pending"]:
+                self.finish_order()
+            positions = self.client.get("/api/v5/account/positions")
+            self._verify_global_exchange_state(positions)
+
         for instrument in selected:
             if self.stop_requested():
                 return
@@ -485,8 +491,6 @@ class SwapRunner:
             self.fees[instrument.inst_id] = max(
                 taker_fee(self.client, instrument), self.strategy.fee_bps / 10000
             )
-        if self.state["pending"]:
-            self.finish_order()
         try:
             saved_candidates = self.candidate_store.load() or {"version": 1, "candidates": []}
             candidates = saved_candidates.get("candidates", [])
@@ -517,6 +521,49 @@ class SwapRunner:
             capital_ceiling=self.state["capital_ceiling"],
             leverage=self.config.leverage,
         )
+
+    def _verify_global_exchange_state(self, positions):
+        managed = self.state.get("markets", {})
+        for row in positions:
+            quantity = dec(row.get("pos") or "0")
+            if quantity == 0:
+                continue
+            market = row.get("instId")
+            if market not in managed:
+                raise RuntimeError(
+                    f"untracked exchange position outside managed instruments: {market}"
+                )
+            if managed[market].get("position") is None:
+                raise RuntimeError(
+                    f"exchange position exists without strategy state: {market}"
+                )
+
+        if self.client.get("/api/v5/trade/orders-pending"):
+            raise RuntimeError("unexpected pending ordinary orders; reconcile before trading")
+
+        tracked_stops = set()
+        pending = self.state.get("pending") or {}
+        if pending.get("stop_id"):
+            tracked_stops.add(str(pending["stop_id"]))
+        for market_state in managed.values():
+            position = market_state.get("position") or {}
+            for leg in position.get("legs", []):
+                if leg.get("stop_id"):
+                    tracked_stops.add(str(leg["stop_id"]))
+
+        for kind in ("conditional", "oco", "trigger", "move_order_stop"):
+            for row in self.client.get(
+                "/api/v5/trade/orders-algo-pending", {"ordType": kind}
+            ):
+                client_id = str(
+                    row.get("algoClOrdId")
+                    or row.get("attachAlgoClOrdId")
+                    or ""
+                )
+                if not client_id or client_id not in tracked_stops:
+                    raise RuntimeError(
+                        "unexpected pending algorithmic order; inspect OKX before trading"
+                    )
 
     def _save_candidates(self):
         self.candidate_store.save(
