@@ -609,6 +609,21 @@ class Controller:
                     "capital_fraction": config.capital_fraction,
                 },
                 "parameters": {"values": settings_values(config, strategy), "fields": schema()},
+                "settings_locked": bool(
+                    running
+                    or halt
+                    or error
+                    or (
+                        state
+                        and (
+                            state.get("pending")
+                            or any(
+                                m.get("position")
+                                for m in state.get("markets", {}).values()
+                            )
+                        )
+                    )
+                ),
                 "entry_candidates": candidates,
                 "entry_candidate_error": candidate_error,
                 "candidate_scan_pending": scan_pending,
