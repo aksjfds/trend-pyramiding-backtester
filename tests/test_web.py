@@ -497,7 +497,7 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     assert controller.snapshot("live")["entry_approval_enabled"] is False
 
     controller.approval_store(False).save({"version": 1, "approvals": []})
-    with pytest.raises(ValueError, match="失效"):
+    with pytest.raises(ValueError, match="不存在"):
         controller.approve_entry("live", "missing")
 
 
