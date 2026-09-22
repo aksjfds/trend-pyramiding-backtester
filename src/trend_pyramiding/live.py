@@ -9,7 +9,7 @@ import time
 import tomllib
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, fields
 from decimal import Decimal
 from pathlib import Path
 
@@ -262,27 +262,44 @@ def account_snapshot(client: OKXClient, *, for_trading=True) -> dict:
     }
 
 
-def selected_config(config, store):
-    selection = StateStore(store.path.with_suffix(".selection.json")).load()
-    if selection is None:
-        return config
-    instruments = selection.get("instruments")
-    if not isinstance(instruments, list) or any(not isinstance(x, str) for x in instruments):
-        raise ValueError("币种选择文件格式错误")
-    config = replace(config, instruments=tuple(instruments))
-    config.validate()
-    return config
-
-
 def config_fingerprint(config, strategy, uid):
+    live = asdict(config)
+    # Legacy universe-selection fields remain in LiveConfig only so old config/state
+    # files can still be read. They no longer affect runtime behavior.
+    live.pop("top_n", None)
+    live.pop("instruments", None)
     return hashlib.sha256(
         json.dumps(
-            {"live": asdict(config), "strategy": asdict(strategy), "uid": uid}, sort_keys=True
+            {"live": live, "strategy": asdict(strategy), "uid": uid}, sort_keys=True
         ).encode()
     ).hexdigest()
 
 
-def taker_fee(client: OKXClient, instrument: Instrument) -> float:
+def _legacy_config_fingerprint(config, strategy, uid):
+    return hashlib.sha256(
+        json.dumps(
+            {"live": asdict(config), "strategy": asdict(strategy), "uid": uid},
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
+def _legacy_state_matches_current(state, config, strategy, uid):
+    configuration = state.get("configuration") or {}
+    try:
+        saved_config = LiveConfig(**configuration["live"])
+        saved_strategy = BacktestConfig(**configuration["strategy"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        _legacy_config_fingerprint(saved_config, saved_strategy, uid)
+        == state.get("fingerprint")
+        and config_fingerprint(saved_config, saved_strategy, uid)
+        == config_fingerprint(config, strategy, uid)
+    )
+
+
+def taker_fee(client: OKXClient, instrument: Instrument) -> float:def taker_fee(client: OKXClient, instrument: Instrument) -> float:
     params = {"instType": "SWAP"}
     if instrument.fee_group:
         params["groupId"] = instrument.fee_group
@@ -496,45 +513,54 @@ class SwapRunner:
             raise ValueError("API key requires trade permission before starting the runner")
         self.state = self.store.load()
         fingerprint = config_fingerprint(self.config, self.strategy, account["uid"])
-        selection_changed = False
+        configuration_changed = False
         previous_capital_fraction = None
         if self.state and self.state["fingerprint"] != fingerprint:
-            # Universe changes or explicitly saved parameters require a matching prior account and flat state.
-            old_choices = [(), tuple(self.state["markets"])]
-            if self.state.get("configured_instruments") is not None:
-                old_choices.append(tuple(self.state["configured_instruments"]))
-            selection_changed = any(
-                config_fingerprint(
-                    replace(self.config, instruments=choice), self.strategy, account["uid"]
-                )
-                == self.state["fingerprint"]
-                for choice in old_choices
-            )
-            if not selection_changed:
+            if _legacy_state_matches_current(
+                self.state, self.config, self.strategy, account["uid"]
+            ):
+                # Upgrade old states whose only fingerprint difference is the removed
+                # preselected-universe/top-N configuration. Existing positions remain
+                # fully managed from state["markets"].
+                self.state["fingerprint"] = fingerprint
+                self.state["configuration"] = {
+                    "live": asdict(self.config),
+                    "strategy": asdict(self.strategy),
+                }
+                self.state.pop("configured_instruments", None)
+                self.save()
+            else:
                 from .settings import migration_source
 
-                previous = migration_source(self.store, self.state, account["uid"], self.config)
-                if previous:
-                    selection_changed = True
-                    previous_capital_fraction = previous.capital_fraction
-            if (
-                not selection_changed
-                or self.state["pending"]
-                or any(m["position"] for m in self.state["markets"].values())
-            ):
-                raise ValueError(
-                    "account/config differs from saved state; do not reuse or delete active state"
+                previous = migration_source(
+                    self.store, self.state, account["uid"], self.config
                 )
+                if previous:
+                    configuration_changed = True
+                    previous_capital_fraction = previous.capital_fraction
+                if (
+                    not configuration_changed
+                    or self.state["pending"]
+                    or any(m["position"] for m in self.state["markets"].values())
+                ):
+                    raise ValueError(
+                        "account/config differs from saved state; do not reuse or delete active state"
+                    )
+
         requested = (
             tuple(self.state["markets"])
-            if self.state and not selection_changed
-            else self.config.instruments
+            if self.state and not configuration_changed
+            else ()
         )
-        selected = universe(self.client, self.config.top_n, requested)
+        selected = (
+            universe(self.client, max(1, len(requested)), requested)
+            if requested
+            else []
+        )
         self.instruments = {i.inst_id: i for i in selected}
         self.instrument_catalog.update(self.instruments)
         positions = self.client.get("/api/v5/account/positions")
-        if not self.state or selection_changed:
+        if not self.state or configuration_changed:
             if any(dec(p.get("pos") or "0") != 0 for p in positions):
                 raise ValueError("first start requires an account without open positions")
             if self.client.get("/api/v5/trade/orders-pending"):
@@ -551,12 +577,14 @@ class SwapRunner:
                 ceiling *= self.config.capital_fraction / previous_capital_fraction
             self.state = {
                 "version": 1,
-                "configured_instruments": list(self.config.instruments),
                 "fingerprint": fingerprint,
-                "configuration": {"live": asdict(self.config), "strategy": asdict(self.strategy)},
+                "configuration": {
+                    "live": asdict(self.config),
+                    "strategy": asdict(self.strategy),
+                },
                 "capital_ceiling": ceiling,
                 "pending": None,
-                "markets": {i.inst_id: {"last_bar": None, "position": None} for i in selected},
+                "markets": {},
             }
             self.save()
         else:
