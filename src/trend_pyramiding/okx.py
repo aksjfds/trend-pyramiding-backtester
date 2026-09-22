@@ -26,9 +26,34 @@ HOSTS = {
 
 
 class OKXError(RuntimeError):
-    def __init__(self, code: str, operation: str):
+    def __init__(
+        self,
+        code: str,
+        operation: str,
+        *,
+        top_code: str | None = None,
+        message: str = "",
+        s_code: str = "",
+        s_message: str = "",
+        order_id: str = "",
+    ):
         self.code = str(code)
-        super().__init__(f"OKX {operation} failed (code={self.code})")
+        self.top_code = str(top_code if top_code is not None else code)
+        self.message = str(message or "")
+        self.s_code = str(s_code or "")
+        self.s_message = str(s_message or "")
+        self.order_id = str(order_id or "")
+        details = []
+        if self.message:
+            details.append(f"msg={self.message}")
+        if self.s_code:
+            details.append(f"sCode={self.s_code}")
+        if self.s_message:
+            details.append(f"sMsg={self.s_message}")
+        if self.order_id:
+            details.append(f"ordId={self.order_id}")
+        suffix = ", " + ", ".join(details) if details else ""
+        super().__init__(f"OKX {operation} failed (code={self.top_code}{suffix})")
 
 
 class TransientRead(OKXError):
@@ -202,11 +227,24 @@ class OKXClient:
                 if method != "GET":
                     raise UncertainWrite(f"invalid response to {method} {path}")
                 raise OKXError("invalid_response", path)
-            if str(raw["code"]) != "0":
-                if method == "GET" and private and str(raw["code"]) == "50102" and attempt < 2:
+
+            rows = raw.get("data")
+            first_item = (
+                rows[0]
+                if isinstance(rows, list) and rows and isinstance(rows[0], dict)
+                else {}
+            )
+            top_code = str(raw["code"])
+            message = str(raw.get("msg") or "")
+            item_code = str(first_item.get("sCode") or "")
+            item_message = str(first_item.get("sMsg") or "")
+            order_id = str(first_item.get("ordId") or "")
+
+            if top_code != "0":
+                if method == "GET" and private and top_code == "50102" and attempt < 2:
                     self.sync_time()
                     continue
-                if method == "GET" and str(raw["code"]) in {
+                if method == "GET" and top_code in {
                     "50001",
                     "50004",
                     "50011",
@@ -214,24 +252,47 @@ class OKXClient:
                     "50040",
                 }:
                     if attempt == 2:
-                        raise TransientRead(str(raw["code"]), path)
+                        raise TransientRead(top_code, path)
                     time.sleep(0.5 * (attempt + 1))
                     continue
-                if method != "GET" and str(raw["code"]) in {"50004", "50001", "50013"}:
+                if method != "GET" and top_code in {"50004", "50001", "50013"}:
                     raise UncertainWrite(
-                        f"OKX response leaves {method} {path} uncertain (code={raw['code']})"
+                        f"OKX response leaves {method} {path} uncertain "
+                        f"(code={top_code}, msg={message})"
                     )
-                raise OKXError(str(raw["code"]), path)
-            rows = raw.get("data")
+                raise OKXError(
+                    top_code,
+                    path,
+                    top_code=top_code,
+                    message=message,
+                    s_code=item_code,
+                    s_message=item_message,
+                    order_id=order_id,
+                )
+
             if not isinstance(rows, list):
                 if method != "GET":
                     raise UncertainWrite(f"missing response data for {path}")
                 raise OKXError("invalid_data", path)
             for row in rows:
                 if isinstance(row, dict) and str(row.get("sCode", "0")) != "0":
-                    if method != "GET" and str(row["sCode"]) in {"50004", "50001", "50013"}:
-                        raise UncertainWrite(f"OKX item response leaves {path} uncertain")
-                    raise OKXError(str(row["sCode"]), path)
+                    s_code = str(row["sCode"])
+                    s_message = str(row.get("sMsg") or "")
+                    order_id = str(row.get("ordId") or "")
+                    if method != "GET" and s_code in {"50004", "50001", "50013"}:
+                        raise UncertainWrite(
+                            f"OKX item response leaves {path} uncertain "
+                            f"(sCode={s_code}, sMsg={s_message})"
+                        )
+                    raise OKXError(
+                        s_code,
+                        path,
+                        top_code=top_code,
+                        message=message,
+                        s_code=s_code,
+                        s_message=s_message,
+                        order_id=order_id,
+                    )
             return rows
         raise AssertionError("unreachable")
 
