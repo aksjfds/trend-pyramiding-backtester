@@ -9,8 +9,8 @@ import time
 import tomllib
 import uuid
 from contextlib import contextmanager
-from decimal import Decimal
 from dataclasses import asdict, dataclass, fields, replace
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
