@@ -189,11 +189,12 @@ def runner(tmp_path, monkeypatch):
     exchange = Exchange()
     bot = SwapRunner(
         exchange,
-        LiveConfig(instruments=(MARKET,)),
+        LiveConfig(),
         BacktestConfig(),
         StateStore(tmp_path / "state/live.json"),
     )
     bot.initialize()
+    bot._ensure_managed_market(MARKET)
     return bot
 
 
