@@ -790,6 +790,7 @@ class SwapRunner:
                 for instrument in scan_instruments
             }
             for future in as_completed(futures):
+                self.keepalive()
                 instrument = futures[future]
                 try:
                     results[instrument.inst_id] = (future.result(), None)
@@ -894,7 +895,6 @@ class SwapRunner:
                 )
                 found += 1
 
-            self._save_candidates()
             self.store.event(
                 "candidate_scan_completed",
                 request_id=request_id,
@@ -904,6 +904,7 @@ class SwapRunner:
                 candidates=found,
             )
         finally:
+            self._save_candidates()
             self._finish_scan_request(request_id)
 
     def _take_manual_entry_request(self):
