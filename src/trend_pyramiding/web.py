@@ -84,6 +84,61 @@ class Controller:
     def candidate_scan_store(self, demo):
         return StateStore(self.store(demo).path.with_suffix(".candidate-scan.json"))
 
+    def manual_entry_store(self, demo):
+        return StateStore(self.store(demo).path.with_suffix(".manual-entry.json"))
+
+    def request_manual_entry(self, mode, instrument):
+        if not isinstance(instrument, str) or not instrument:
+            raise ValueError("请选择有效的币种")
+        with self.lock:
+            running = self.process is not None and self.process.poll() is None
+            if not running or self.stopping or self.closing:
+                raise ValueError("策略未运行，不能手动开仓")
+            if mode != self.mode:
+                raise ValueError("页面运行方式与当前策略进程不一致，请刷新页面")
+            demo, trading = self.profile(self.mode)
+            if not trading:
+                raise ValueError("只读观察模式不能手动开仓")
+            try:
+                beat = json.loads(self.heartbeat.read_text())
+            except (OSError, ValueError, TypeError):
+                beat = {}
+            if (
+                beat.get("pid") != self.process.pid
+                or beat.get("phase") not in {"ready", "degraded"}
+            ):
+                raise ValueError("策略尚未准备好开仓，请等待运行状态稳定")
+
+            store = self.store(demo)
+            if store.halt_path.exists():
+                raise ValueError("策略处于异常暂停状态，不能手动开仓")
+            state = store.load()
+            if not state or instrument not in state.get("markets", {}):
+                raise ValueError("该币种不在当前策略管理列表，请先停止策略并修改交易币种")
+            if state.get("pending"):
+                raise ValueError("存在待核对订单，不能提交新的开仓")
+            if state["markets"][instrument].get("position"):
+                raise ValueError("该币种已经有策略持仓")
+
+            request_store = self.manual_entry_store(demo)
+            try:
+                with request_store.lock():
+                    data = request_store.load() or {"version": 1, "request": None}
+                    if data.get("request"):
+                        raise ValueError("已有手动开仓请求正在处理，请等待完成")
+                    request_store.save(
+                        {
+                            "version": 1,
+                            "request": {
+                                "id": secrets.token_hex(12),
+                                "instrument": instrument,
+                                "requested_at": time.time(),
+                            },
+                        }
+                    )
+            except RuntimeError:
+                raise ValueError("策略正在处理手动开仓，请稍后重试") from None
+
     def request_candidate_scan(self, mode):
         with self.lock:
             running = self.process is not None and self.process.poll() is None
@@ -539,10 +594,13 @@ class Controller:
             candidates = []
             candidate_error = None
             scan_pending = False
+            manual_entry_pending = False
             try:
                 candidates = self.entry_candidates(demo)
                 scan_data = self.candidate_scan_store(demo).load()
                 scan_pending = bool(scan_data and scan_data.get("request"))
+                manual_data = self.manual_entry_store(demo).load()
+                manual_entry_pending = bool(manual_data and manual_data.get("request"))
             except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:
                 candidate_error = self.redact(str(exc))
             credential_status = {}
@@ -605,7 +663,24 @@ class Controller:
                     and not self.stopping
                     and not halt
                     and not bool((state or {}).get("pending"))
+                    and not manual_entry_pending
                 ),
+                "manual_entry_pending": manual_entry_pending,
+                "manual_entry_enabled": bool(
+                    running
+                    and heartbeat
+                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and self.profile(self.mode)[1]
+                    and not self.stopping
+                    and not halt
+                    and not bool((state or {}).get("pending"))
+                    and not manual_entry_pending
+                ),
+                "manual_entry_instruments": [
+                    row["instrument"]
+                    for row in rows
+                    if not row.get("contracts") or float(row.get("contracts") or 0) == 0
+                ],
                 "account": self.accounts.get(profile),
                 "markets": rows,
                 "capital_ceiling": (state or {}).get("capital_ceiling"),
@@ -746,6 +821,10 @@ class Handler(BaseHTTPRequestHandler):
                 controller.approve_entry(data.get("mode", "watch"), data.get("candidate_id"))
             elif self.path == "/api/generate-candidates":
                 controller.request_candidate_scan(data.get("mode", "watch"))
+            elif self.path == "/api/manual-entry":
+                controller.request_manual_entry(
+                    data.get("mode", "watch"), data.get("instrument")
+                )
             else:
                 self.send(404, {"error": "操作不存在"})
                 return
