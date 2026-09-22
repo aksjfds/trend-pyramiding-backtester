@@ -191,6 +191,11 @@ function renderEntryCandidates(s) {
     const tr = document.createElement('tr');
     const instrumentCell = document.createElement('td');
     instrumentCell.textContent = candidate.instrument;
+    const volumeCell = document.createElement('td');
+    const volume = Number(candidate.volume_usdt_24h);
+    volumeCell.textContent = Number.isFinite(volume)
+      ? volume.toLocaleString('zh-CN', {maximumFractionDigits: 0}) + ' USDT'
+      : '—';
     const actionCell = document.createElement('td');
     const button = document.createElement('button');
     button.type = 'button';
@@ -199,7 +204,7 @@ function renderEntryCandidates(s) {
     button.disabled = !s.entry_approval_enabled || actionBusy;
     button.addEventListener('click', () => approveEntry(candidate.id, candidate.instrument));
     actionCell.append(button);
-    tr.append(instrumentCell, actionCell);
+    tr.append(instrumentCell, volumeCell, actionCell);
     return tr;
   }));
   if (s.entry_candidate_error) {
@@ -212,7 +217,7 @@ function renderEntryCandidates(s) {
     $('candidate-feedback').textContent = '当前状态暂不能开仓，请先处理异常暂停或待核对订单。';
   } else if (!$('candidate-feedback').dataset.locked) {
     $('candidate-feedback').textContent = candidates.length
-      ? '这里只列出符合策略条件的币种；点击“开仓”时会按最新行情重新核验并计算止损和张数。'
+      ? '候选按 24h USDT 成交量从高到低排列；点击“开仓”时会按最新行情重新核验并计算止损和张数。'
       : '不会因新 K 线自动扫描；需要时点击“生成候选”。';
   }
 }
