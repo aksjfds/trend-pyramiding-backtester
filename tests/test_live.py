@@ -976,6 +976,11 @@ def test_specified_instrument_can_open_without_candidate_signal(runner, monkeypa
     request_manual_entry(runner)
     runner.step()
 
+    entry = [body for path, body in runner.client.posts if path.endswith("trade/order")][-1]
+    assert entry["ordType"] == "fok"
+    assert entry["px"] == "123.9"
+    assert entry["px"] != "124.0"
+
     position = runner.state["markets"][MARKET]["position"]
     assert position is not None
     assert len(position["legs"]) == 1
