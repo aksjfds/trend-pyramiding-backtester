@@ -482,8 +482,26 @@ class SwapRunner:
             )
         if self.state["pending"]:
             self.finish_order()
-        self.entry_candidates = {}
-        self.candidate_store.save({"version": 1, "candidates": []})
+        try:
+            saved_candidates = self.candidate_store.load() or {"version": 1, "candidates": []}
+            candidates = saved_candidates.get("candidates", [])
+            if not isinstance(candidates, list):
+                raise ValueError("invalid entry candidate state")
+            now = self.client.now()
+            self.entry_candidates = {
+                item["instrument"]: item
+                for item in candidates
+                if (
+                    isinstance(item, dict)
+                    and item.get("instrument") in self.instruments
+                    and float(item.get("expires_at", 0)) > now
+                    and self.state["markets"][item["instrument"]]["position"] is None
+                )
+            }
+        except (ValueError, OSError, KeyError, TypeError):
+            self.entry_candidates = {}
+        self._save_candidates()
+        # A click is an ephemeral command: never replay it after a worker restart.
         self.approval_store.save({"version": 1, "approvals": []})
         self.store.event(
             "ready",
