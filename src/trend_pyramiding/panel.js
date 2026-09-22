@@ -2,7 +2,6 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="panel-token"]').content;
 const labels = {watch:'只读观察', 'demo-watch':'模拟账户观察', demo:'模拟交易', live:'实盘交易'};
-let marketCatalog = [], catalogProfile = null, catalogLoading = false;
 let settingsEditor=null, settingsSaving=false, settingsProfile=null;
 const accountAttempts = {};
 let last = null, actionBusy = false, checkBusy = false, loading = false, connected = false, networkLoading = false;
@@ -10,7 +9,7 @@ const date = value => value ? new Date(typeof value === 'number' ? value * 1000 
 const num = value => value === null || value === undefined ? '—' : Number(value).toLocaleString('zh-CN', {maximumFractionDigits:6});
 async function api(path, data) {
   const controller = new AbortController();
-  const timeout = setTimeout(()=>controller.abort(), path === '/api/check' ? 130000 : path.includes('/api/instruments') ? 60000 : 15000);
+  const timeout = setTimeout(()=>controller.abort(), path === '/api/check' ? 130000 : 15000);
   try {
   const response = await fetch(path, {signal:controller.signal, cache:'no-store', headers:{'X-Panel-Token':token, ...(data ? {'Content-Type':'application/json'} : {})}, ...(data ? {method:'POST', body:JSON.stringify(data)} : {})});
   const result = await response.json();
@@ -48,7 +47,7 @@ function controls() {
     !last?.manual_entry_enabled ||
     !!last?.manual_entry_pending ||
     actionBusy ||
-    !$('manual-entry-instrument').value ||
+    !validManualInstrument($('manual-entry-instrument').value) ||
     !manualFractionValid;
   $('manual-entry-submit').textContent =
     last?.manual_entry_pending ? '提交中…' : '开仓并交给策略接管';
@@ -119,51 +118,42 @@ function render(s) {
   $('log-count').textContent = s.logs.length + ' 条';
   syncSettings(s); controls();
 }
-function renderManualEntry(s) {
-  const select = $('manual-entry-instrument');
-  const previous = select.value;
-  const held = new Set(
-    (s.markets || [])
-      .filter(row => Number(row.contracts || 0) > 0)
-      .map(row => row.instrument)
-  );
-  const managed = (s.manual_entry_instruments || []).filter(instrument => !held.has(instrument));
-  const catalog = marketCatalog.map(item => item.instrument).filter(instrument => !held.has(instrument));
-  const instruments = [...managed, ...catalog.filter(instrument => !managed.includes(instrument))];
-  select.replaceChildren(Object.assign(document.createElement('option'), {
-    value: '',
-    textContent: instruments.length ? '选择可交易币种' : '正在加载可交易币种…',
-  }));
-  instruments.forEach(instrument => {
-    const option = document.createElement('option');
-    option.value = instrument;
-    option.textContent = instrument;
-    select.append(option);
-  });
-  if (instruments.includes(previous)) select.value = previous;
+function normalizeManualInstrument(value) {
+  const text = String(value || '').trim().toUpperCase().replace(/\s+/g,'');
+  if (!text) return '';
+  if (/^[A-Z0-9._]+$/.test(text)) return text + '-USDT-SWAP';
+  if (/^[A-Z0-9._]+-USDT$/.test(text)) return text + '-SWAP';
+  return text;
+}
 
+function validManualInstrument(value) {
+  return /^[A-Z0-9._]+-USDT-SWAP$/.test(normalizeManualInstrument(value));
+}
+
+function renderManualEntry(s) {
   if (s.manual_entry_pending) {
     $('manual-entry-note').textContent = '手动开仓请求已提交，worker 正在核验最新 K 线、初始止损、当前最优卖价、账户余额和交易所最小张数。';
   } else if (!s.running) {
-    $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，选择币种和资金使用比例即可手动开仓。';
+    $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，输入币种和资金使用比例即可手动开仓。';
   } else if (!s.manual_entry_enabled) {
     $('manual-entry-note').textContent = '当前状态不能手动开仓，请先处理异常暂停、待核对订单或等待策略准备完成。';
   } else {
-    $('manual-entry-note').textContent = '不要求进入候选列表；本次首仓按所选资金比例计算张数，并以当前最优卖价作为买入限价提交 FOK，不按市价追单。成交后由策略接管加仓、止损和退出。';
+    $('manual-entry-note').textContent = '可输入 BTC 或 BTC-USDT-SWAP；提交时统一规范为大写 USDT 永续合约名。worker 会校验合约是否受支持，并按所选资金比例计算首仓。';
   }
 }
 
 async function submitManualEntry() {
-  const instrument = $('manual-entry-instrument').value;
+  const instrument = normalizeManualInstrument($('manual-entry-instrument').value);
   const percent = Number($('manual-entry-fraction').value);
   if (
-    !instrument ||
+    !validManualInstrument(instrument) ||
     !Number.isFinite(percent) ||
     percent <= 0 ||
     percent > 100 ||
     actionBusy ||
     last?.manual_entry_pending
   ) return;
+  $('manual-entry-instrument').value = instrument;
   actionBusy = true;
   $('manual-entry-note').textContent = `正在提交 ${instrument}，本次首仓使用 ${percent}% 策略资金…`;
   controls();
@@ -306,7 +296,6 @@ async function refresh() {
   if (loading) return; loading=true;
   try { const s=await api('/api/status?mode='+encodeURIComponent($('mode').value)); connected=true; $('connection').textContent='服务已连接 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}); render(s);
     if (s.credentials[s.profile] && !s.checking && !checkBusy && Date.now() - Math.max(accountAttempts[s.profile] || 0, (s.account?.time || 0)*1000, (s.account?.error_time || 0)*1000) > 60000) void checkAccount();
-    if (catalogProfile !== s.profile && !catalogLoading) void loadMarkets();
   }
   catch(error) {connected=false; $('connection').textContent='连接中断 · 请检查网页服务'; message(error.message); controls();}
   finally {loading=false;}
@@ -325,29 +314,17 @@ async function checkAccount() {
   catch(error){message(error.message);}
   finally {checkBusy=false; await refresh(); controls();}
 }
-async function loadMarkets() {
-  if (catalogLoading) return; catalogLoading=true;
-  const mode=$('mode').value, profile=last?.profile;
-  try {
-    const data=await api('/api/instruments?mode='+encodeURIComponent(mode));
-    if (last?.profile !== profile) return;
-    marketCatalog=data.items; catalogProfile=profile;
-    if (last) renderManualEntry(last);
-    controls();
-  } catch(error) {
-    catalogProfile=profile;
-    if (last && !last.manual_entry_pending) {
-      $('manual-entry-note').textContent='可交易币种加载失败：'+error.message;
-    }
-  } finally {catalogLoading=false;}
-}
 $('check').addEventListener('click',()=>{message('');checkAccount();});
 $('refresh-network').addEventListener('click',()=>refreshNetwork());
 $('generate-candidates').addEventListener('click',()=>generateCandidates());
-$('manual-entry-instrument').addEventListener('change',()=>controls());
+$('manual-entry-instrument').addEventListener('input',()=>controls());
+$('manual-entry-instrument').addEventListener('change',()=>{
+  $('manual-entry-instrument').value=normalizeManualInstrument($('manual-entry-instrument').value);
+  controls();
+});
 $('manual-entry-fraction').addEventListener('input',()=>controls());
 $('manual-entry-submit').addEventListener('click',()=>submitManualEntry());
-$('mode').addEventListener('change',()=>{message('');cancelSettingsEdit();marketCatalog=[];catalogProfile=null;controls();refresh();});
+$('mode').addEventListener('change',()=>{message('');cancelSettingsEdit();controls();refresh();});
 controls(); refresh(); refreshNetwork(); setInterval(refresh,2000);
 
 function settingsLocked() {
