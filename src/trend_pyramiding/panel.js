@@ -8,6 +8,8 @@ const accountAttempts = {};
 let last = null, actionBusy = false, checkBusy = false, loading = false, connected = false, networkLoading = false;
 const date = value => value ? new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN', {hour12:false}) : '—';
 const num = value => value === null || value === undefined ? '—' : Number(value).toLocaleString('zh-CN', {maximumFractionDigits:6});
+const usdt = value => value === null || value === undefined ? '—' : Number(value).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' USDT';
+const pct = value => value === null || value === undefined ? '—' : Number(value).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2}) + '%';
 async function api(path, data) {
   const controller = new AbortController();
   const timeout = setTimeout(()=>controller.abort(), path === '/api/check' ? 130000 : path.includes('/api/instruments') ? 60000 : 15000);
@@ -102,15 +104,40 @@ function render(s) {
   $('account-time').textContent = s.account?.time ? '更新于 ' + date(s.account.time) : s.credentials[s.profile] ? '正在读取账户…' : '尚未配置此账户';
   $('account-orders').textContent = account ? `${account.open_positions ?? "—"} / ${account.pending_orders ?? "—"}` : '—';
   $('budget').textContent = account ? '当前权益对应上限 ' + num(account.capital_limit_usdt_approx) + ' USDT' : '保证金与手续费预留';
-  $('position-count').replaceChildren(document.createTextNode(s.markets.filter(m => Number(m.contracts)>0).length), Object.assign(document.createElement('span'), {textContent:' 个币对'}));
-  $('pending').textContent = s.pending ? '有待核对订单' : '策略保存的记录 · 无待核对订单';
-  const rows = s.markets || [];
-  $('market-count').textContent = rows.length ? `${rows.length} 个策略管理币对` : '当前没有策略管理币对';
-  $('market-body').replaceChildren(...rows.map(row=>{
-    const tr = document.createElement('tr');
-    [row.instrument,num(row.contracts),num(row.average),num(row.stop),row.legs ?? '—',date(row.last_bar)].forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td);});return tr;
+  const positions = account?.positions || [];
+  $('position-count').replaceChildren(document.createTextNode(positions.length), Object.assign(document.createElement('span'), {textContent:' 个仓位'}));
+  $('pending').textContent = s.pending ? '有待核对订单' : 'OKX 实际仓位 · 无待核对订单';
+  $('market-count').textContent = positions.length ? `${positions.length} 个仓位` : '当前无仓位';
+  $('position-list').replaceChildren(...positions.map(row=>{
+    const card=document.createElement('article');
+    card.className='position-item';
+    const title=document.createElement('div');
+    title.className='position-name';
+    title.textContent=row.instrument;
+    const grid=document.createElement('div');
+    grid.className='position-grid';
+    const fields=[
+      ['持仓量（USDT）',usdt(row.notional_usdt)],
+      ['保证金（USDT）',usdt(row.margin_usdt)],
+      ['维持保证金率',pct(row.maintenance_margin_ratio_pct)],
+      ['开仓均价',num(row.average)],
+      ['标记价格',num(row.mark)],
+      ['策略止损价',num(row.strategy_stop)],
+    ];
+    fields.forEach(([label,value])=>{
+      const cell=document.createElement('div');
+      cell.className='position-field';
+      const name=document.createElement('span');
+      name.textContent=label;
+      const strong=document.createElement('strong');
+      strong.textContent=value;
+      cell.append(name,strong);
+      grid.append(cell);
+    });
+    card.append(title,grid);
+    return card;
   }));
-  $('empty-markets').hidden = rows.length > 0;
+  $('empty-markets').hidden = positions.length > 0;
   renderManualEntry(s);
   renderEntryCandidates(s);
   const logText = s.logs.map(line=>`[${date(line.time)}] ${line.text}`).join('\n') || '等待启动策略，运行信息会显示在这里。';
