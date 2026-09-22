@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="panel-token"]').content;
 const labels = {watch:'只读观察', 'demo-watch':'模拟账户观察', demo:'模拟交易', live:'实盘交易'};
+let marketCatalog=[], catalogProfile=null, catalogLoading=false, selectedManualInstrument=null;
 let settingsEditor=null, settingsSaving=false, settingsProfile=null;
 const accountAttempts = {};
 let last = null, actionBusy = false, checkBusy = false, loading = false, connected = false, networkLoading = false;
@@ -9,7 +10,7 @@ const date = value => value ? new Date(typeof value === 'number' ? value * 1000 
 const num = value => value === null || value === undefined ? '—' : Number(value).toLocaleString('zh-CN', {maximumFractionDigits:6});
 async function api(path, data) {
   const controller = new AbortController();
-  const timeout = setTimeout(()=>controller.abort(), path === '/api/check' ? 130000 : 15000);
+  const timeout = setTimeout(()=>controller.abort(), path === '/api/check' ? 130000 : path.includes('/api/instruments') ? 60000 : 15000);
   try {
   const response = await fetch(path, {signal:controller.signal, cache:'no-store', headers:{'X-Panel-Token':token, ...(data ? {'Content-Type':'application/json'} : {})}, ...(data ? {method:'POST', body:JSON.stringify(data)} : {})});
   const result = await response.json();
@@ -47,7 +48,7 @@ function controls() {
     !last?.manual_entry_enabled ||
     !!last?.manual_entry_pending ||
     actionBusy ||
-    !validManualInstrument($('manual-entry-instrument').value) ||
+    !manualInstrumentMatch($('manual-entry-instrument').value) ||
     !manualFractionValid;
   $('manual-entry-submit').textContent =
     last?.manual_entry_pending ? '提交中…' : '开仓并交给策略接管';
@@ -118,42 +119,75 @@ function render(s) {
   $('log-count').textContent = s.logs.length + ' 条';
   syncSettings(s); controls();
 }
-function normalizeManualInstrument(value) {
-  const text = String(value || '').trim().toUpperCase().replace(/\s+/g,'');
-  if (!text) return '';
-  if (/^[A-Z0-9._]+$/.test(text)) return text + '-USDT-SWAP';
-  if (/^[A-Z0-9._]+-USDT$/.test(text)) return text + '-SWAP';
-  return text;
+function manualInstrumentMatch(value) {
+  const text=String(value || '').trim();
+  if (!text) return null;
+  if (selectedManualInstrument === text) return text;
+  return marketCatalog.some(item=>item.instrument === text) ? text : null;
 }
 
-function validManualInstrument(value) {
-  return /^[A-Z0-9._]+-USDT-SWAP$/.test(normalizeManualInstrument(value));
+function manualInstrumentSuggestions(value) {
+  const query=String(value || '').trim().toUpperCase();
+  if (!query) return [];
+  return marketCatalog
+    .filter(item=>{
+      const instrument=item.instrument.toUpperCase();
+      const base=instrument.split('-')[0];
+      return base.startsWith(query) || instrument.includes(query);
+    })
+    .slice(0,8);
+}
+
+function renderManualSuggestions() {
+  const input=$('manual-entry-instrument');
+  const panel=$('manual-entry-suggestions');
+  const matches=manualInstrumentSuggestions(input.value);
+  panel.replaceChildren(...matches.map(item=>{
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='manual-entry-suggestion';
+    button.setAttribute('role','option');
+    button.textContent=item.instrument;
+    button.addEventListener('mousedown',event=>event.preventDefault());
+    button.addEventListener('click',()=>{
+      input.value=item.instrument;
+      selectedManualInstrument=item.instrument;
+      panel.hidden=true;
+      input.setAttribute('aria-expanded','false');
+      controls();
+      input.focus();
+    });
+    return button;
+  }));
+  panel.hidden=!matches.length;
+  input.setAttribute('aria-expanded',matches.length ? 'true' : 'false');
 }
 
 function renderManualEntry(s) {
   if (s.manual_entry_pending) {
     $('manual-entry-note').textContent = '手动开仓请求已提交，worker 正在核验最新 K 线、初始止损、当前最优卖价、账户余额和交易所最小张数。';
   } else if (!s.running) {
-    $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，输入币种和资金使用比例即可手动开仓。';
+    $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，输入币种并从联想结果选择可交易合约。';
   } else if (!s.manual_entry_enabled) {
     $('manual-entry-note').textContent = '当前状态不能手动开仓，请先处理异常暂停、待核对订单或等待策略准备完成。';
+  } else if (catalogLoading) {
+    $('manual-entry-note').textContent = '正在加载当前可交易 USDT 永续合约，用于输入联想。';
   } else {
-    $('manual-entry-note').textContent = '可输入 BTC 或 BTC-USDT-SWAP；提交时统一规范为大写 USDT 永续合约名。worker 会校验合约是否受支持，并按所选资金比例计算首仓。';
+    $('manual-entry-note').textContent = '输入 BTC 等简称会显示匹配的当前可交易合约；不会自动改写输入内容。选择联想项后再按资金比例提交。';
   }
 }
 
 async function submitManualEntry() {
-  const instrument = normalizeManualInstrument($('manual-entry-instrument').value);
+  const instrument = manualInstrumentMatch($('manual-entry-instrument').value);
   const percent = Number($('manual-entry-fraction').value);
   if (
-    !validManualInstrument(instrument) ||
+    !instrument ||
     !Number.isFinite(percent) ||
     percent <= 0 ||
     percent > 100 ||
     actionBusy ||
     last?.manual_entry_pending
   ) return;
-  $('manual-entry-instrument').value = instrument;
   actionBusy = true;
   $('manual-entry-note').textContent = `正在提交 ${instrument}，本次首仓使用 ${percent}% 策略资金…`;
   controls();
@@ -296,6 +330,7 @@ async function refresh() {
   if (loading) return; loading=true;
   try { const s=await api('/api/status?mode='+encodeURIComponent($('mode').value)); connected=true; $('connection').textContent='服务已连接 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}); render(s);
     if (s.credentials[s.profile] && !s.checking && !checkBusy && Date.now() - Math.max(accountAttempts[s.profile] || 0, (s.account?.time || 0)*1000, (s.account?.error_time || 0)*1000) > 60000) void checkAccount();
+    if (catalogProfile !== s.profile && !catalogLoading) void loadInstrumentCatalog();
   }
   catch(error) {connected=false; $('connection').textContent='连接中断 · 请检查网页服务'; message(error.message); controls();}
   finally {loading=false;}
@@ -314,17 +349,56 @@ async function checkAccount() {
   catch(error){message(error.message);}
   finally {checkBusy=false; await refresh(); controls();}
 }
+async function loadInstrumentCatalog() {
+  if (catalogLoading) return;
+  catalogLoading=true;
+  const mode=$('mode').value;
+  const profile=last?.profile;
+  try {
+    const data=await api('/api/instruments?mode='+encodeURIComponent(mode));
+    if (last?.profile !== profile) return;
+    marketCatalog=Array.isArray(data.items) ? data.items : [];
+    catalogProfile=profile;
+    renderManualSuggestions();
+  } catch(error) {
+    marketCatalog=[];
+    catalogProfile=profile;
+    if (last && !last.manual_entry_pending) {
+      $('manual-entry-note').textContent='币种联想目录加载失败：'+error.message;
+    }
+  } finally {
+    catalogLoading=false;
+    if (last) renderManualEntry(last);
+    controls();
+  }
+}
 $('check').addEventListener('click',()=>{message('');checkAccount();});
 $('refresh-network').addEventListener('click',()=>refreshNetwork());
 $('generate-candidates').addEventListener('click',()=>generateCandidates());
-$('manual-entry-instrument').addEventListener('input',()=>controls());
-$('manual-entry-instrument').addEventListener('change',()=>{
-  $('manual-entry-instrument').value=normalizeManualInstrument($('manual-entry-instrument').value);
+$('manual-entry-instrument').addEventListener('input',()=>{
+  selectedManualInstrument=null;
+  renderManualSuggestions();
   controls();
+});
+$('manual-entry-instrument').addEventListener('focus',()=>renderManualSuggestions());
+$('manual-entry-instrument').addEventListener('blur',()=>{
+  setTimeout(()=>{
+    $('manual-entry-suggestions').hidden=true;
+    $('manual-entry-instrument').setAttribute('aria-expanded','false');
+  },100);
 });
 $('manual-entry-fraction').addEventListener('input',()=>controls());
 $('manual-entry-submit').addEventListener('click',()=>submitManualEntry());
-$('mode').addEventListener('change',()=>{message('');cancelSettingsEdit();controls();refresh();});
+$('mode').addEventListener('change',()=>{
+  message('');
+  cancelSettingsEdit();
+  marketCatalog=[];
+  catalogProfile=null;
+  selectedManualInstrument=null;
+  $('manual-entry-suggestions').hidden=true;
+  controls();
+  refresh();
+});
 controls(); refresh(); refreshNetwork(); setInterval(refresh,2000);
 
 function settingsLocked() {
