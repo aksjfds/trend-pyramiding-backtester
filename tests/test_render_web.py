@@ -296,20 +296,23 @@ def test_real_waitress_serves_auth_health_and_control_requests(app):
         assert not thread.is_alive()
 
 
-def test_render_market_selection_requires_auth_and_saves(app, monkeypatch):
+def test_render_instrument_catalog_requires_auth_and_selection_is_removed(app, monkeypatch):
     monkeypatch.setattr(
-        app.controller, "catalog", lambda mode: [{"instrument": "HYPE-USDT-SWAP", "turnover": 100}]
+        app.controller,
+        "catalog",
+        lambda mode: [{"instrument": "HYPE-USDT-SWAP", "turnover": 100}],
     )
     assert request(app, "/api/instruments", login=False).code == 401
-    assert request(app, "/api/selection", "POST", b'{"instruments":[]}', login=False).code == 401
     assert request(app, "/api/instruments").code == 200
     assert (
         request(
-            app, "/api/selection", "POST", b'{"mode":"watch","instruments":["HYPE-USDT-SWAP"]}'
+            app,
+            "/api/selection",
+            "POST",
+            b'{"mode":"watch","instruments":["HYPE-USDT-SWAP"]}',
         ).code
-        == 200
+        == 404
     )
-    assert app.controller.snapshot()["selection"]["instruments"] == ["HYPE-USDT-SWAP"]
 
 
 def test_cloud_settings_use_persistent_state_and_require_auth(app):
