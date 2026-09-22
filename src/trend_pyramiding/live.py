@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 import tomllib
@@ -346,6 +347,25 @@ def closed_candles(
         frame, strategy.ema_period, strategy.entry_breakout_lookback
     )
     return frame
+
+
+def manual_initial_stop(row: pd.Series, strategy: BacktestConfig, entry_price: float):
+    """Return the tightest valid strategy stop below the actual manual entry price."""
+    atr_value = float(row["atr"])
+    structure_low = float(row["structure_low"])
+    if not math.isfinite(atr_value) or not math.isfinite(structure_low) or atr_value <= 0:
+        return None
+
+    candidates = (
+        structure_low - strategy.structure_buffer_atr * atr_value,
+        entry_price - strategy.atr_stop_mult * atr_value,
+    )
+    valid = [
+        stop
+        for stop in candidates
+        if math.isfinite(stop) and 0 < stop < entry_price
+    ]
+    return max(valid) if valid else None
 
 
 def size_contracts(
@@ -989,11 +1009,14 @@ class SwapRunner:
             )
             if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
                 raise ValueError("latest confirmed candle is stale or in the future")
-            stop = _initial_stop(row, self.strategy)
+            bid, ask, last = self.quote_prices(market)
+            limit = rounded(ask, instrument.tick, up=True)
+            if float(limit) < ask:
+                raise ValueError("invalid_limit_price")
+            stop = manual_initial_stop(row, self.strategy, float(limit))
             if stop is None:
                 raise ValueError("strategy_stop_unavailable")
             stop = float(rounded(stop, instrument.tick))
-            bid, ask, last = self.quote_prices(market)
         except (MarketUnavailable, TransientRead, ValueError, OKXError) as exc:
             self.store.event(
                 "manual_entry_rejected",
@@ -1013,18 +1036,6 @@ class SwapRunner:
                 bid=bid,
                 ask=ask,
                 stop=stop,
-            )
-            return used_margin
-
-        # Manual entries use the current best ask as a hard limit. Do not
-        # chase through the book: if that best price is gone, FOK cancels.
-        limit = rounded(ask, instrument.tick, up=True)
-        if float(limit) < ask:
-            self.store.event(
-                "manual_entry_rejected",
-                request_id=request_id,
-                instrument=market,
-                reason="invalid_limit_price",
             )
             return used_margin
 
