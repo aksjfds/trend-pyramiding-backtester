@@ -462,3 +462,70 @@ def test_worker_stays_in_foreground_terminal_session(controller, monkeypatch):
     assert "start_new_session" not in seen
     assert seen["stdout"] is web.subprocess.PIPE
     assert seen["stderr"] is web.subprocess.STDOUT
+
+
+def test_manual_entry_approval_queues_only_current_live_candidate(controller):
+    from types import SimpleNamespace
+
+    controller.process = SimpleNamespace(poll=lambda: None)
+    controller.mode = "live"
+    candidate = {
+        "id": "candidate-1",
+        "instrument": "HYPE-USDT-SWAP",
+        "bar": "2026-09-22T08:00:00+00:00",
+        "signal_close": 50.0,
+        "stop": 48.0,
+        "indicative_contracts": "1",
+        "detected_at": time.time(),
+        "expires_at": time.time() + 120,
+    }
+    controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
+
+    snapshot = controller.snapshot("live")
+    assert snapshot["entry_candidates"] == [candidate]
+    assert snapshot["entry_approval_enabled"] is True
+
+    controller.approve_entry("live", "candidate-1")
+    assert controller.approval_store(False).load()["approvals"] == ["candidate-1"]
+
+    with pytest.raises(ValueError, match="失效"):
+        controller.approve_entry("live", "missing")
+
+
+def test_manual_entry_approval_rejected_in_readonly_mode(controller):
+    from types import SimpleNamespace
+
+    controller.process = SimpleNamespace(poll=lambda: None)
+    controller.mode = "watch"
+    candidate = {
+        "id": "candidate-1",
+        "instrument": "HYPE-USDT-SWAP",
+        "bar": "2026-09-22T08:00:00+00:00",
+        "signal_close": 50.0,
+        "stop": 48.0,
+        "indicative_contracts": "1",
+        "detected_at": time.time(),
+        "expires_at": time.time() + 120,
+    }
+    controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
+    with pytest.raises(ValueError, match="只读"):
+        controller.approve_entry("watch", "candidate-1")
+
+
+def test_manual_entry_approval_http_endpoint(server, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.controller,
+        "approve_entry",
+        lambda mode, candidate_id: calls.append((mode, candidate_id)),
+    )
+    headers = {"X-Panel-Token": server.token, "Origin": server.origin}
+    status, _, body = request(
+        server,
+        "POST",
+        "/api/approve-entry",
+        {"mode": "live", "candidate_id": "candidate-1"},
+        **headers,
+    )
+    assert status == 200 and json.loads(body)["ok"] is True
+    assert calls == [("live", "candidate-1")]

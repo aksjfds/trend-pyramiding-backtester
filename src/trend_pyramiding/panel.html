@@ -6,7 +6,7 @@
 <title>顺势 · OKX 策略控制台</title><link rel="stylesheet" href="/panel.css"><script defer src="/panel.js"></script>
 </head>
 <body>
-<aside class="sidebar"><a class="brand" href="/" aria-label="策略控制台首页"><span class="brand-mark">↗</span><span>顺势<span class="brand-sub">PYRAMIDING</span></span></a><div class="nav-title">工作空间</div><a class="nav active" href="#overview"><span>◫</span> 策略总览</a><a class="nav" href="#positions"><span>▤</span> 持仓与止损</a><a class="nav" href="#activity"><span>≋</span> 运行日志</a><div class="side-foot"><span class="dot"></span> 本地运行<div>OKX · USDT 永续合约</div></div></aside>
+<aside class="sidebar"><a class="brand" href="/" aria-label="策略控制台首页"><span class="brand-mark">↗</span><span>顺势<span class="brand-sub">PYRAMIDING</span></span></a><div class="nav-title">工作空间</div><a class="nav active" href="#overview"><span>◫</span> 策略总览</a><a class="nav" href="#entry-candidates"><span>＋</span> 开仓候选</a><a class="nav" href="#positions"><span>▤</span> 持仓与止损</a><a class="nav" href="#activity"><span>≋</span> 运行日志</a><div class="side-foot"><span class="dot"></span> 本地运行<div>OKX · USDT 永续合约</div></div></aside>
 <main id="overview">
 <header><div class="breadcrumb">工作空间 <span>/</span> 策略总览</div><div class="connection" id="connection">正在连接服务…</div></header>
 <div class="page-heading"><div><div class="eyebrow">STRATEGY OVERVIEW</div><h1>让趋势运行。</h1><p>启动策略，查看持仓，掌握每一次加仓与止损。</p></div><div class="badge neutral" id="run-badge" role="status">正在读取</div></div>
@@ -43,6 +43,10 @@
 <div class="actions"><button id="save-selection" class="primary" disabled>保存币种选择</button><button id="reload-markets" class="secondary">刷新币种</button></div>
 <p id="selection-feedback" class="hint" role="status"></p>
 </section>
+<section class="card entry-candidates" id="entry-candidates"><div class="section-heading"><div><h2>待确认开仓</h2><p class="hint">每根新 K 线收盘后，策略扫描全部选中币种。这里只显示满足首笔开仓条件且当前预算允许的币种；你确认开仓后，后续加仓、止损和退出继续由策略自动管理。</p></div><span class="tag" id="candidate-count">0 个候选</span></div>
+<div class="table-scroll"><table><thead><tr><th>永续合约</th><th>信号 K 线</th><th>信号收盘价</th><th>初始止损</th><th>预计张数</th><th>剩余确认时间</th><th>操作</th></tr></thead><tbody id="candidate-body"></tbody></table></div>
+<div class="empty" id="empty-candidates"><div class="empty-icon">◎</div><strong>当前没有开仓候选</strong><p>等待下一根 K 线收盘后重新扫描。</p></div>
+<p id="candidate-feedback" class="hint" role="status"></p></section>
 <section class="card positions" id="positions"><div class="section-heading"><div><h2>持仓与止损</h2><p class="hint">策略保存的记录；停止后可能与交易所持仓不同。</p></div><span class="tag" id="market-count">待选择币对</span></div>
 <div class="table-scroll"><table><thead><tr><th>永续合约</th><th>持仓张数</th><th>平均入场价</th><th>当前止损价</th><th>加仓档数</th><th>最近处理 K 线</th></tr></thead><tbody id="market-body"></tbody></table></div>
 <div class="empty" id="empty-markets"><div class="empty-icon">▥</div><strong>策略尚无持仓记录</strong><p>还没有策略持仓。可在上方选择交易币种。</p></div></section>
