@@ -593,3 +593,82 @@ def test_generate_candidates_http_endpoint(server, monkeypatch):
     )
     assert status == 200 and json.loads(body)["ok"] is True
     assert calls == ["live"]
+
+
+def test_specified_instrument_manual_entry_is_queued_for_managed_flat_coin(controller):
+    from types import SimpleNamespace
+
+    controller.process = SimpleNamespace(
+        pid=12345,
+        poll=lambda: None,
+        send_signal=lambda *_: None,
+        wait=lambda: 0,
+    )
+    controller.mode = "live"
+    mark_worker_ready(controller)
+    controller.store(False).save(
+        {
+            "version": 1,
+            "pending": None,
+            "markets": {
+                "HYPE-USDT-SWAP": {"last_bar": None, "position": None},
+                "XAU-USDT-SWAP": {"last_bar": None, "position": {"qty": "1"}},
+            },
+        }
+    )
+
+    state = controller.snapshot("live")
+    assert state["manual_entry_enabled"] is True
+    assert state["manual_entry_instruments"] == ["HYPE-USDT-SWAP"]
+
+    controller.request_manual_entry("live", "HYPE-USDT-SWAP")
+    queued = controller.manual_entry_store(False).load()["request"]
+    assert queued["instrument"] == "HYPE-USDT-SWAP"
+    assert queued["id"]
+    assert controller.snapshot("live")["manual_entry_pending"] is True
+
+    with pytest.raises(ValueError, match="管理列表"):
+        controller.request_manual_entry("live", "ETH-USDT-SWAP")
+
+
+def test_specified_instrument_manual_entry_rejects_existing_position(controller):
+    from types import SimpleNamespace
+
+    controller.process = SimpleNamespace(
+        pid=12345,
+        poll=lambda: None,
+        send_signal=lambda *_: None,
+        wait=lambda: 0,
+    )
+    controller.mode = "live"
+    mark_worker_ready(controller)
+    controller.store(False).save(
+        {
+            "version": 1,
+            "pending": None,
+            "markets": {
+                "HYPE-USDT-SWAP": {"last_bar": None, "position": {"qty": "1"}},
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="已经有策略持仓"):
+        controller.request_manual_entry("live", "HYPE-USDT-SWAP")
+
+
+def test_manual_entry_http_endpoint(server, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.controller,
+        "request_manual_entry",
+        lambda mode, instrument: calls.append((mode, instrument)),
+    )
+    headers = {"X-Panel-Token": server.token, "Origin": server.origin}
+    status, _, body = request(
+        server,
+        "POST",
+        "/api/manual-entry",
+        {"mode": "live", "instrument": "HYPE-USDT-SWAP"},
+        **headers,
+    )
+    assert status == 200 and json.loads(body)["ok"] is True
+    assert calls == [("live", "HYPE-USDT-SWAP")]
