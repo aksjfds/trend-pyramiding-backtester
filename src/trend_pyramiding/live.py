@@ -386,6 +386,7 @@ class SwapRunner:
         self.entry_candidates = {}
         self.candidate_store = StateStore(self.store.path.with_suffix(".candidates.json"))
         self.approval_store = StateStore(self.store.path.with_suffix(".entry-approvals.json"))
+        self.scan_store = StateStore(self.store.path.with_suffix(".candidate-scan.json"))
 
     def save(self):
         self.store.save(self.state)
@@ -501,8 +502,9 @@ class SwapRunner:
         except (ValueError, OSError, KeyError, TypeError):
             self.entry_candidates = {}
         self._save_candidates()
-        # A click is an ephemeral command: never replay it after a worker restart.
+        # Click commands are ephemeral: never replay them after a worker restart.
         self.approval_store.save({"version": 1, "approvals": []})
+        self.scan_store.save({"version": 1, "request": None})
         self.store.event(
             "ready",
             demo=self.config.demo,
@@ -570,6 +572,115 @@ class SwapRunner:
                 stop=float(stop),
                 indicative_contracts=number(contracts),
             )
+
+    def _take_scan_request(self):
+        try:
+            with self.scan_store.lock():
+                data = self.scan_store.load() or {"version": 1, "request": None}
+                request = data.get("request")
+                self.scan_store.save({"version": 1, "request": None})
+        except RuntimeError:
+            return None
+        if not isinstance(request, dict) or not request.get("id"):
+            return None
+        return request
+
+    def _process_candidate_scan(self, account, budget, used_margin, stop_requested):
+        request = self._take_scan_request()
+        if request is None:
+            return
+
+        self.entry_candidates = {}
+        self._save_candidates()
+        request_id = str(request["id"])
+        checked = 0
+        found = 0
+        self.store.event(
+            "candidate_scan_started",
+            request_id=request_id,
+            instruments=list(self.instruments),
+        )
+
+        for market, instrument in self.instruments.items():
+            if stop_requested():
+                return
+            item = self.state["markets"][market]
+            if item["position"] is not None:
+                continue
+            try:
+                frame = closed_candles(self.client, market, self.strategy, self.config.bar)
+                self.quote(market)
+            except (MarketUnavailable, TransientRead) as exc:
+                self.market_warning(market, exc)
+                continue
+
+            row = frame.iloc[-1]
+            bar = row["timestamp"].isoformat()
+            age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
+            if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
+                self.market_warning(market, "latest confirmed candle is stale or in the future")
+                continue
+            if self.market_warnings.pop(market, None):
+                self.store.event("market_recovered", instrument=market)
+
+            checked += 1
+            stop = _initial_stop(row, self.strategy)
+            if not bool(row["signal"]) or stop is None:
+                continue
+            stop = float(rounded(stop, instrument.tick))
+            try:
+                bid, ask = self.quote(market)
+            except (MarketUnavailable, TransientRead) as exc:
+                self.market_warning(market, exc)
+                continue
+            if bid <= stop:
+                continue
+
+            limit = rounded(
+                ask * (1 + self.config.max_entry_slippage_bps / 10000),
+                instrument.tick,
+            )
+            if float(limit) < ask:
+                continue
+            market_budget = budget / len(self.instruments)
+            quantity = size_contracts(
+                instrument,
+                price=float(limit),
+                stop=stop,
+                market_budget=market_budget,
+                total_budget=budget,
+                available=account["available_usdt"],
+                used_margin=used_margin,
+                position=None,
+                strategy=self.strategy,
+                fee_rate=self.fees[market],
+                leverage=self.config.leverage,
+            )
+            if quantity == 0:
+                continue
+
+            next_bar_close = (
+                row["timestamp"].timestamp() + 2 * BAR_SECONDS[self.config.bar]
+            )
+            self._publish_candidate(
+                market,
+                bar=bar,
+                close=float(row["close"]),
+                stop=stop,
+                contracts=quantity,
+                expires_at=min(
+                    self.client.now() + self.config.max_signal_age_seconds,
+                    next_bar_close,
+                ),
+            )
+            found += 1
+
+        self.store.event(
+            "candidate_scan_completed",
+            request_id=request_id,
+            checked_markets=checked,
+            candidates=found,
+        )
 
     def _approval_ids(self):
         try:
@@ -721,6 +832,8 @@ class SwapRunner:
             )
             self._ack_approval(candidate_id)
             if item["position"] is not None:
+                item["last_bar"] = candidate["bar"]
+                self.save()
                 self._remove_candidate(market)
 
             cost = float(quantity * instrument.contract_value * limit) * (
@@ -1003,6 +1116,7 @@ class SwapRunner:
             if stop_requested():
                 return
             self.reconcile(market)
+
         account = account_snapshot(self.client)
         budget = min(
             self.state["capital_ceiling"], account["equity"] * self.config.capital_fraction
@@ -1019,31 +1133,35 @@ class SwapRunner:
                 except (MarketUnavailable, TransientRead) as exc:
                     self.market_warning(market, exc)
                     blocked_markets.add(market)
-                    # Reserve the full budget when exposure cannot be valued.
-                    # Stop maintenance continues, but no market can add exposure.
                     used_margin = max(used_margin, budget)
                     continue
                 notional = float(dec(position["qty"]) * instrument.contract_value) * max(
                     ask, position["avg"]
                 )
                 used_margin += notional * (1 / self.config.leverage + 2 * self.fees[market])
+
         used_margin = self._process_entry_approvals(
             account, budget, used_margin, stop_requested
         )
+        self._process_candidate_scan(account, budget, used_margin, stop_requested)
+
+        # New candles never create first-entry candidates automatically. The normal
+        # loop below only manages positions that already exist.
         for market, instrument in self.instruments.items():
             if stop_requested():
                 return
+            item = self.state["markets"][market]
+            position = item["position"]
+            if position is None:
+                continue
             try:
                 frame = closed_candles(self.client, market, self.strategy, self.config.bar)
-                # Check before consuming a candle so public-data failures are recoverable.
-                if not self.state["markets"][market]["position"]:
-                    self.quote(market)
             except (MarketUnavailable, TransientRead) as exc:
                 self.market_warning(market, exc)
                 continue
+
             row = frame.iloc[-1]
             bar = row["timestamp"].isoformat()
-            item = self.state["markets"][market]
             age = self.client.now() - row["timestamp"].timestamp() - BAR_SECONDS[self.config.bar]
             if age < 0 or age > BAR_SECONDS[self.config.bar] + 100:
                 self.market_warning(market, "latest confirmed candle is stale or in the future")
@@ -1052,58 +1170,51 @@ class SwapRunner:
                 self.store.event("market_recovered", instrument=market)
             if item["last_bar"] is not None and pd.Timestamp(bar) <= pd.Timestamp(item["last_bar"]):
                 continue
-            if item["position"] and item["last_bar"]:
+            if item["last_bar"]:
                 missed = frame[frame["timestamp"] > pd.Timestamp(item["last_bar"])]
                 if len(missed):
-                    item["position"]["high"] = max(
-                        item["position"]["high"], float(missed["high"].max())
-                    )
-            # Persist consumption before any action: restart never repeats this bar.
+                    position["high"] = max(position["high"], float(missed["high"].max()))
+
             item["last_bar"] = bar
             self.save()
             self.trail(market, row)
             position = item["position"]
+            if position is None:
+                continue
             if age > self.config.max_signal_age_seconds:
-                if not position:
-                    self._remove_candidate(market)
                 self.store.event("skip_stale_entry", instrument=market, age_seconds=round(age))
                 continue
-            if position:
-                signal = (
-                    len(position["legs"]) < len(self.strategy.risk_weights)
-                    and row["close"] > position["avg"]
-                    and row["close"]
-                    >= position["last_fill"] + self.strategy.add_step_atr * row["atr"]
-                    and (
-                        not self.strategy.require_add_breakout
-                        or row["close"] > row["add_prior_high"]
-                    )
+
+            signal = (
+                len(position["legs"]) < len(self.strategy.risk_weights)
+                and row["close"] > position["avg"]
+                and row["close"]
+                >= position["last_fill"] + self.strategy.add_step_atr * row["atr"]
+                and (
+                    not self.strategy.require_add_breakout
+                    or row["close"] > row["add_prior_high"]
                 )
-                stop = position["stop"]
-            else:
-                signal = bool(row["signal"])
-                stop = _initial_stop(row, self.strategy)
-            if not signal or stop is None:
-                if not position:
-                    self._remove_candidate(market)
+            )
+            if not signal:
                 continue
-            stop = float(rounded(stop, instrument.tick))
+            stop = float(rounded(position["stop"], instrument.tick))
             try:
                 bid, ask = self.quote(market)
             except (MarketUnavailable, TransientRead) as exc:
                 self.market_warning(market, exc)
                 continue
-            # Skip a signal if price already crossed its stop or retraced its add threshold.
             if bid <= stop:
-                if not position:
-                    self._remove_candidate(market)
                 continue
-            if position and (
+            if (
                 ask <= position["avg"]
                 or ask < position["last_fill"] + self.strategy.add_step_atr * float(row["atr"])
             ):
                 continue
-            limit = rounded(ask * (1 + self.config.max_entry_slippage_bps / 10000), instrument.tick)
+
+            limit = rounded(
+                ask * (1 + self.config.max_entry_slippage_bps / 10000),
+                instrument.tick,
+            )
             if float(limit) < ask:
                 continue
             market_budget = budget / len(self.instruments)
@@ -1121,37 +1232,16 @@ class SwapRunner:
                 leverage=self.config.leverage,
             )
             if quantity == 0:
-                if not position:
-                    self._remove_candidate(market)
                 self.store.event("skip_below_minimum_or_budget", instrument=market)
                 continue
-            if position is None:
-                expires_at = (
-                    row["timestamp"].timestamp()
-                    + BAR_SECONDS[self.config.bar]
-                    + self.config.max_signal_age_seconds
-                )
-                self._publish_candidate(
-                    market,
-                    bar=bar,
-                    close=float(row["close"]),
-                    stop=stop,
-                    contracts=quantity,
-                    expires_at=expires_at,
-                )
-                continue
-            # Recheck exchange position immediately before sending an add.
+
             self.reconcile(market)
             if item["position"] is not position:
                 continue
             if stop_requested():
                 return
             stop_id = "ts" + uuid.uuid4().hex[:28]
-            risk_budget = (
-                position["risk_budget"]
-                if position
-                else market_budget * self.strategy.risk_per_trade
-            )
+            risk_budget = position["risk_budget"]
             self._order(
                 market,
                 {
@@ -1178,7 +1268,6 @@ class SwapRunner:
                     "risk_budget": risk_budget,
                 },
             )
-            # Reserve conservatively for this iteration, even if FOK was canceled.
             cost = float(quantity * instrument.contract_value * limit) * (
                 1 / self.config.leverage + 2 * self.fees[market]
             )

@@ -31,6 +31,13 @@ function controls() {
   $('stop').disabled = !connected || !active || !!last?.stopping || actionBusy;
   $('check').disabled = !connected || checkBusy || !!last?.checking;
   $('check').textContent = checkBusy || last?.checking ? '正在读取…' : '刷新账户 ↗';
+  $('generate-candidates').disabled =
+    !connected ||
+    !last?.candidate_scan_enabled ||
+    !!last?.candidate_scan_pending ||
+    actionBusy;
+  $('generate-candidates').textContent =
+    last?.candidate_scan_pending ? '生成中…' : '生成候选';
   const locked = !!last?.selection?.locked || !!last?.external_process?.length;
   $('selection-mode').disabled = locked || selectionSaving;
   $('save-selection').disabled = !connected || locked || !selectionDirty || selectionSaving || checkBusy || !!last?.checking || ($('selection-mode').value === 'manual' && chosen.size === 0);
@@ -128,11 +135,34 @@ function renderEntryCandidates(s) {
   if (s.entry_candidate_error) {
     $('candidate-feedback').textContent = '候选列表读取失败：' + s.entry_candidate_error;
   } else if (!s.running) {
-    $('candidate-feedback').textContent = '启动模拟交易或实盘交易后才会扫描开仓候选。';
+    $('candidate-feedback').textContent = '启动模拟交易或实盘交易后，点击“生成候选”进行扫描。';
+  } else if (s.candidate_scan_pending) {
+    $('candidate-feedback').textContent = '正在扫描全部已选币种…';
   } else if (!s.entry_approval_enabled && candidates.length) {
     $('candidate-feedback').textContent = '当前状态暂不能批准新开仓，请先处理异常暂停或待核对订单。';
   } else if (!$('candidate-feedback').dataset.locked) {
-    $('candidate-feedback').textContent = candidates.length ? '候选只在当前信号有效期内可确认。' : '';
+    $('candidate-feedback').textContent = candidates.length
+      ? '本次扫描候选只在当前有效期内可确认。'
+      : '不会因新 K 线自动扫描；需要时点击“生成候选”。';
+  }
+}
+
+async function generateCandidates() {
+  if (actionBusy || last?.candidate_scan_pending) return;
+  actionBusy = true;
+  $('candidate-feedback').dataset.locked = '1';
+  $('candidate-feedback').textContent = '正在提交候选扫描…';
+  controls();
+  try {
+    await api('/api/generate-candidates', {mode: $('mode').value});
+    $('candidate-feedback').textContent = '扫描请求已提交，等待策略返回结果…';
+  } catch (error) {
+    $('candidate-feedback').textContent = '生成候选失败：' + error.message;
+  } finally {
+    actionBusy = false;
+    await refresh();
+    delete $('candidate-feedback').dataset.locked;
+    controls();
   }
 }
 
@@ -265,6 +295,7 @@ async function loadMarkets() {
 }
 $('check').addEventListener('click',()=>{message('');checkAccount();});
 $('refresh-network').addEventListener('click',()=>refreshNetwork());
+$('generate-candidates').addEventListener('click',()=>generateCandidates());
 $('mode').addEventListener('change',()=>{message('');selectionDirty=false;settingsDirty=false;marketCatalog=[];catalogProfile=null;selectionProfile=null;controls();refresh();});
 $('selection-mode').addEventListener('change',()=>{selectionDirty=true;$('selection-feedback').textContent='';syncSelection(last);controls();});
 $('market-search').addEventListener('input',()=>{renderMarkets();controls();});

@@ -7,3 +7,5 @@
 .network-row{display:flex;align-items:center;justify-content:flex-end;gap:10px}.network-row .text-button{flex:none}.network-status{font-weight:600}.network-status.ok{color:#087f6d}.network-status.bad{color:#a94437}.network-status.checking{color:#75838b}
 
 .entry-candidates{margin-top:22px}.candidate-open{border:1px solid var(--accent);background:#fff;color:var(--accent);padding:7px 12px}.candidate-open:hover:not(:disabled){background:#eef8f5}.candidate-open:disabled{opacity:.45;cursor:not-allowed}
+
+.candidate-tools{display:flex;align-items:center;gap:10px}.candidate-generate{padding:8px 12px}.candidate-generate:disabled{opacity:.45}

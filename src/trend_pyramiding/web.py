@@ -81,6 +81,49 @@ class Controller:
     def approval_store(self, demo):
         return StateStore(self.store(demo).path.with_suffix(".entry-approvals.json"))
 
+    def candidate_scan_store(self, demo):
+        return StateStore(self.store(demo).path.with_suffix(".candidate-scan.json"))
+
+    def request_candidate_scan(self, mode):
+        with self.lock:
+            running = self.process is not None and self.process.poll() is None
+            if not running or self.stopping or self.closing:
+                raise ValueError("策略未运行，不能生成候选")
+            if mode != self.mode:
+                raise ValueError("页面运行方式与当前策略进程不一致，请刷新页面")
+            demo, trading = self.profile(self.mode)
+            if not trading:
+                raise ValueError("只读观察模式不能生成开仓候选")
+            try:
+                beat = json.loads(self.heartbeat.read_text())
+            except (OSError, ValueError, TypeError):
+                beat = {}
+            if (
+                beat.get("pid") != self.process.pid
+                or beat.get("phase") not in {"ready", "degraded"}
+            ):
+                raise ValueError("策略尚未准备好生成候选，请等待运行状态稳定")
+            store = self.store(demo)
+            if store.halt_path.exists():
+                raise ValueError("策略处于异常暂停状态，不能生成候选")
+            state = store.load()
+            if state and state.get("pending"):
+                raise ValueError("存在待核对订单，不能生成新的候选")
+
+            scan_store = self.candidate_scan_store(demo)
+            try:
+                with scan_store.lock():
+                    data = scan_store.load() or {"version": 1, "request": None}
+                    if data.get("request"):
+                        raise ValueError("候选扫描已提交，请等待完成")
+                    request = {
+                        "id": secrets.token_hex(12),
+                        "requested_at": time.time(),
+                    }
+                    scan_store.save({"version": 1, "request": request})
+            except RuntimeError:
+                raise ValueError("策略正在处理候选扫描，请稍后重试") from None
+
     def entry_candidates(self, demo):
         data = self.candidate_store(demo).load()
         if data is None:
@@ -123,6 +166,15 @@ class Controller:
             demo, trading = self.profile(active_mode)
             if not trading:
                 raise ValueError("只读观察模式不能开仓")
+            try:
+                beat = json.loads(self.heartbeat.read_text())
+            except (OSError, ValueError, TypeError):
+                beat = {}
+            if (
+                beat.get("pid") != self.process.pid
+                or beat.get("phase") not in {"ready", "degraded"}
+            ):
+                raise ValueError("策略尚未准备好开仓，请等待运行状态稳定")
             store = self.store(demo)
             if store.halt_path.exists():
                 raise ValueError("策略处于异常暂停状态，不能开仓")
@@ -486,8 +538,11 @@ class Controller:
                 error = "无法读取已保存参数，请检查 settings.json"
             candidates = []
             candidate_error = None
+            scan_pending = False
             try:
                 candidates = self.entry_candidates(demo)
+                scan_data = self.candidate_scan_store(demo).load()
+                scan_pending = bool(scan_data and scan_data.get("request"))
             except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:
                 candidate_error = self.redact(str(exc))
             credential_status = {}
@@ -532,8 +587,20 @@ class Controller:
                 },
                 "entry_candidates": candidates,
                 "entry_candidate_error": candidate_error,
+                "candidate_scan_pending": scan_pending,
+                "candidate_scan_enabled": bool(
+                    running
+                    and heartbeat
+                    and heartbeat.get("phase") in {"ready", "degraded"}
+                    and self.profile(self.mode)[1]
+                    and not self.stopping
+                    and not halt
+                    and not bool((state or {}).get("pending"))
+                ),
                 "entry_approval_enabled": bool(
                     running
+                    and heartbeat
+                    and heartbeat.get("phase") in {"ready", "degraded"}
                     and self.profile(self.mode)[1]
                     and not self.stopping
                     and not halt
@@ -677,6 +744,8 @@ class Handler(BaseHTTPRequestHandler):
                 controller.check(data.get("mode", "watch"))
             elif self.path == "/api/approve-entry":
                 controller.approve_entry(data.get("mode", "watch"), data.get("candidate_id"))
+            elif self.path == "/api/generate-candidates":
+                controller.request_candidate_scan(data.get("mode", "watch"))
             else:
                 self.send(404, {"error": "操作不存在"})
                 return

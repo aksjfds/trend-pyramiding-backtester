@@ -134,6 +134,7 @@ class Application:
                 "/api/selection",
                 "/api/settings",
                 "/api/approve-entry",
+                "/api/generate-candidates",
             ):
                 if env.get("CONTENT_TYPE") != "application/json":
                     return respond(415, {"error": "需要 JSON 请求"})
@@ -157,6 +158,8 @@ class Application:
                     self.controller.approve_entry(
                         data.get("mode", "watch"), data.get("candidate_id")
                     )
+                elif path == "/api/generate-candidates":
+                    self.controller.request_candidate_scan(data.get("mode", "watch"))
                 elif path == "/api/stop":
                     self.controller.stop()
                 else:

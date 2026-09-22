@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 import pytest
-from test_live import MARKET, Exchange, approve_first_candidate
+from test_live import MARKET, Exchange, approve_first_candidate, request_candidate_scan
 
 from trend_pyramiding.engine import BacktestConfig
 from trend_pyramiding.live import (
@@ -100,6 +100,8 @@ def test_saved_parameters_migrate_flat_state_and_actual_leverage(tmp_path):
     assert restarted.state["fingerprint"] == config_fingerprint(cfg, strat, "test-account")
     restarted.step()
     assert not exchange.orders
+    request_candidate_scan(restarted)
+    restarted.step()
     approve_first_candidate(restarted)
     restarted.step()
     assert len(exchange.orders) == 1
@@ -202,6 +204,8 @@ def test_worker_trades_once_on_selected_interval(tmp_path, bar, seconds):
     bot.initialize()
     bot.step()
     assert not exchange.orders
+    request_candidate_scan(bot)
+    bot.step()
     approve_first_candidate(bot)
     bot.step()
     assert len(exchange.orders) == 1
