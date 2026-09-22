@@ -940,10 +940,9 @@ class SwapRunner:
             )
             return used_margin
 
-        limit = rounded(
-            ask * (1 + self.config.max_entry_slippage_bps / 10000),
-            instrument.tick,
-        )
+        # Manual entries use the current best ask as a hard limit. Do not
+        # chase through the book: if that best price is gone, FOK cancels.
+        limit = rounded(ask, instrument.tick, up=True)
         if float(limit) < ask:
             self.store.event(
                 "manual_entry_rejected",
