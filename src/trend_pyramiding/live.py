@@ -543,6 +543,20 @@ class SwapRunner:
                         "account/config differs from saved state; do not reuse or delete active state"
                     )
 
+        if self.state and not configuration_changed:
+            pending_market = (self.state.get("pending") or {}).get("market")
+            released = [
+                market
+                for market, market_state in self.state.get("markets", {}).items()
+                if market_state.get("position") is None and market != pending_market
+            ]
+            if released:
+                for market in released:
+                    self.state["markets"].pop(market, None)
+                self.save()
+                for market in released:
+                    self.store.event("market_released", instrument=market, reason="flat_on_startup")
+
         requested = (
             tuple(self.state["markets"])
             if self.state and not configuration_changed
@@ -1525,9 +1539,14 @@ class SwapRunner:
             self.state["markets"][market]["last_bar"] = pd.Timestamp(
                 close_boundary, unit="s", tz="UTC"
             ).isoformat()
-        self.state["markets"][market]["position"] = None
+        self.state["markets"].pop(market, None)
+        self.instruments.pop(market, None)
+        self.fees.pop(market, None)
+        self.market_warnings.pop(market, None)
+        self._remove_candidate(market)
         self.save()
         self.store.event("position_closed", instrument=market)
+        self.store.event("market_released", instrument=market, reason="position_flat")
 
     def flatten(self, market, reason):
         quantity = self.actual_position(market)
@@ -1666,7 +1685,7 @@ class SwapRunner:
             raise RuntimeError("unexpected pending ordinary orders; reconcile before trading")
         position_rows = self.client.get("/api/v5/account/positions")
         actual_positions = self._position_quantities(position_rows)
-        for market in self.instruments:
+        for market in tuple(self.instruments):
             if stop_requested():
                 return
             self._reconcile_actual(market, actual_positions[market])
@@ -1677,7 +1696,7 @@ class SwapRunner:
         )
         used_margin = 0.0
         blocked_markets = set()
-        for market, instrument in self.instruments.items():
+        for market, instrument in tuple(self.instruments.items()):
             if stop_requested():
                 return
             position = self.state["markets"][market]["position"]
@@ -1705,7 +1724,7 @@ class SwapRunner:
 
         # New candles never create first-entry candidates automatically. The normal
         # loop below only manages positions that already exist.
-        for market, instrument in self.instruments.items():
+        for market, instrument in tuple(self.instruments.items()):
             if stop_requested():
                 return
             item = self.state["markets"][market]
