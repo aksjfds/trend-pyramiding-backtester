@@ -45,7 +45,6 @@ def test_check_constructs_read_only_client_and_never_sets_leverage(config, monke
     monkeypatch.setattr(sys, "argv", ["pyramid-okx", "check", "--config", str(config)])
     monkeypatch.setattr(okx_cli, "OKXClient", ReadOnly)
     monkeypatch.setattr(okx_cli.Credentials, "load", lambda *args: object())
-    monkeypatch.setattr(okx_cli, "universe", lambda *args: [])
     monkeypatch.setattr(
         okx_cli,
         "account_snapshot",
