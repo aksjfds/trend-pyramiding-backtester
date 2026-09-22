@@ -684,10 +684,14 @@ class SwapRunner:
         if changed:
             self._save_candidates()
 
-    def _publish_candidate(self, market: str):
+    def _publish_candidate(self, market: str, volume_usdt_24h):
         candidate_id = self._candidate_id(market)
         existing = self.entry_candidates.get(market)
-        candidate = {"id": candidate_id, "instrument": market}
+        candidate = {
+            "id": candidate_id,
+            "instrument": market,
+            "volume_usdt_24h": number(volume_usdt_24h),
+        }
         self.entry_candidates[market] = candidate
         self._save_candidates()
         if not existing or existing.get("id") != candidate_id:
@@ -695,6 +699,7 @@ class SwapRunner:
                 "entry_candidate",
                 instrument=market,
                 candidate_id=candidate_id,
+                volume_usdt_24h=number(volume_usdt_24h),
             )
 
     def _take_scan_request(self):
@@ -741,7 +746,7 @@ class SwapRunner:
         try:
             scan_map = dict(self._supported_catalog())
             scan_map.update(self.instruments)
-            volumes = {}
+            volumes_usdt = {}
             for row in self.client.get(
                 "/api/v5/market/tickers",
                 {"instType": "SWAP"},
@@ -751,15 +756,19 @@ class SwapRunner:
                 if market not in scan_map:
                     continue
                 try:
-                    volume = dec(row.get("volCcy24h") or "0")
+                    # For derivatives OKX reports volCcy24h in base currency.
+                    # Convert it to an approximate USDT notional using the latest price.
+                    volume_usdt = dec(row.get("volCcy24h") or "0") * dec(
+                        row.get("last") or "0"
+                    )
                 except (ValueError, TypeError):
-                    volume = dec(0)
-                if volume.is_finite() and volume > 0:
-                    volumes[market] = volume
+                    volume_usdt = dec(0)
+                if volume_usdt > 0:
+                    volumes_usdt[market] = volume_usdt
             scan_instruments = sorted(
                 scan_map.values(),
                 key=lambda instrument: (
-                    -volumes.get(instrument.inst_id, dec(0)),
+                    -volumes_usdt.get(instrument.inst_id, dec(0)),
                     instrument.inst_id,
                 ),
             )
@@ -805,7 +814,10 @@ class SwapRunner:
                 # only if the user later chooses to open this instrument.
                 if not bool(row["signal"]) or _initial_stop(row, self.strategy) is None:
                     continue
-                self._publish_candidate(market)
+                self._publish_candidate(
+                    market,
+                    volumes_usdt.get(market, dec(0)),
+                )
                 found += 1
 
             self.store.event(
