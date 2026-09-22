@@ -14,6 +14,7 @@ from trend_pyramiding.live import (
     SwapRunner,
     account_snapshot,
     closed_candles,
+    manual_size_contracts,
     size_contracts,
     taker_fee,
 )
@@ -209,13 +210,14 @@ def request_candidate_scan(bot):
     )
 
 
-def request_manual_entry(bot, market=MARKET):
+def request_manual_entry(bot, market=MARKET, capital_fraction=0.20):
     bot.manual_entry_store.save(
         {
             "version": 1,
             "request": {
                 "id": "manual-entry-test",
                 "instrument": market,
+                "capital_fraction": capital_fraction,
                 "requested_at": time.time(),
                 "expires_at": time.time() + CONTROL_COMMAND_TTL_SECONDS,
             },
@@ -392,6 +394,47 @@ def test_below_minimum_does_not_round_up():
     assert quantity == 0
 
 
+def test_manual_size_uses_selected_capital_instead_of_strategy_risk():
+    xau = Instrument(
+        "XAU-USDT-SWAP",
+        dec("0.01"),
+        dec("1"),
+        dec("1"),
+        dec("0.1"),
+        dec("100000"),
+        category="4",
+    )
+    strategy_quantity = size_contracts(
+        xau,
+        price=3800,
+        stop=3700,
+        market_budget=100 / 3,
+        total_budget=100,
+        available=100,
+        used_margin=0,
+        position=None,
+        strategy=BacktestConfig(),
+        fee_rate=0.0005,
+        leverage=5,
+    )
+    direct_quantity = manual_size_contracts(
+        xau,
+        price=3800,
+        capital_budget=20,
+        total_budget=100,
+        available=100,
+        used_margin=0,
+        fee_rate=0.0005,
+        leverage=5,
+    )
+    assert strategy_quantity == 0
+    assert direct_quantity >= xau.minimum
+    direct_cost = float(direct_quantity * xau.contract_value) * 3800 * (
+        1 / 5 + 2 * 0.0005
+    )
+    assert direct_cost <= 20
+
+
 def test_candles_use_confirmed_only_and_reject_gaps():
     exchange = Exchange()
     frame = closed_candles(exchange, MARKET, BacktestConfig())
@@ -426,6 +469,34 @@ def test_step_creates_candidate_only_after_manual_scan_then_approval_opens(runne
 
     runner.step()
     assert len(runner.client.orders) == 1
+
+
+def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, monkeypatch):
+    other = "ETH-USDT-SWAP"
+    original = runner.client.get
+
+    def get(path, params=None, **kwargs):
+        rows = original(path, params, **kwargs)
+        if path.endswith("public/instruments"):
+            return rows + [{**rows[0], "instId": other, "ctValCcy": "ETH"}]
+        return rows
+
+    monkeypatch.setattr(runner.client, "get", get)
+    pulses = []
+    runner.keepalive = lambda: pulses.append(True)
+
+    request_candidate_scan(runner)
+    runner.step()
+
+    candidates = runner.candidate_store.load()["candidates"]
+    assert {item["instrument"] for item in candidates} == {MARKET, other}
+    assert other not in runner.state["markets"]
+    scan_state = runner.scan_store.load()
+    assert scan_state["request"] is None
+    assert scan_state["active"] is None
+    assert len(pulses) >= 2
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert '"total_markets": 2' in events
 
 
 def test_midbar_does_not_scan_until_manually_requested(runner):
