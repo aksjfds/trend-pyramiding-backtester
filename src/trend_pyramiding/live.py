@@ -9,6 +9,7 @@ import time
 import tomllib
 import uuid
 from contextlib import contextmanager
+from decimal import Decimal
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
@@ -1363,8 +1364,11 @@ class SwapRunner:
             else:
                 self.verify_protection(market)
 
-    def _position_quantities(self, rows) -> dict[str, Decimal]:
-        quantities = {market: dec(0) for market in self.instruments}
+    def _position_quantities(
+        self, rows, markets=None
+    ) -> dict[str, Decimal]:
+        targets = tuple(self.instruments) if markets is None else tuple(markets)
+        quantities = {market: dec(0) for market in targets}
         for row in rows:
             market = row.get("instId")
             if market not in quantities:
@@ -1386,7 +1390,7 @@ class SwapRunner:
 
     def actual_position(self, market):
         rows = self.client.get("/api/v5/account/positions", {"instId": market})
-        return self._position_quantities(rows).get(market, dec(0))
+        return self._position_quantities(rows, (market,))[market]
 
     def stop_details(self, stop_id):
         return self.client.get("/api/v5/trade/order-algo", {"algoClOrdId": stop_id})[0]
