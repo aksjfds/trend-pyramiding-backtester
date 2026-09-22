@@ -105,7 +105,7 @@ class Exchange:
         if path.endswith("market/tickers"):
             return [{"instId": MARKET, "volCcy24h": "10000", "last": "100"}]
         if path.endswith("market/ticker"):
-            return [{"bidPx": "123.8", "askPx": "123.9", "ts": str(int(self.clock * 1000))}]
+            return [{"bidPx": "123.8", "askPx": "123.9", "last": "123.9", "ts": str(int(self.clock * 1000))}]
         if path.endswith("market/candles"):
             bars = []
             for i, ts in enumerate(pd.date_range("2026-01-01", periods=121, freq="h", tz="UTC")):
@@ -982,7 +982,7 @@ def test_candidate_scan_ignores_spread_but_open_rechecks_execution(runner, monke
 
     def get(path, *args, **kwargs):
         if bad and path.endswith("market/ticker"):
-            return [{"bidPx": "100", "askPx": "110", "ts": str(int(runner.client.clock * 1000))}]
+            return [{"bidPx": "100", "askPx": "110", "last": "105", "ts": str(int(runner.client.clock * 1000))}]
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(runner.client, "get", get)
@@ -1127,7 +1127,7 @@ def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(ru
 
     def get(path, params=None, **kwargs):
         if path.endswith("market/ticker"):
-            return [{"bidPx": "130.0", "askPx": "130.1", "ts": str(int(runner.client.clock * 1000))}]
+            return [{"bidPx": "130.0", "askPx": "130.1", "last": "130.05", "ts": str(int(runner.client.clock * 1000))}]
         if path.endswith("market/candles"):
             rows = original(path, params, **kwargs)
             rows[0][8] = "1"
@@ -1234,6 +1234,18 @@ def test_manual_entry_request_is_not_replayed_after_worker_restart(tmp_path):
     assert restarted.manual_entry_store.load()["request"] is None
     restarted.step()
     assert not exchange.orders
+
+
+def test_manual_entry_uses_last_price_not_bid_for_stop_precheck(runner, monkeypatch):
+    from trend_pyramiding import live
+
+    monkeypatch.setattr(live, "_initial_stop", lambda row, strategy: 123.85)
+    request_manual_entry(runner)
+    runner.step()
+
+    assert len(runner.client.orders) == 1
+    events = runner.store.path.with_suffix(".events.jsonl").read_text()
+    assert "price_crossed_stop" not in events
 
 
 def test_specified_instrument_entry_is_taken_over_by_strategy(runner):
