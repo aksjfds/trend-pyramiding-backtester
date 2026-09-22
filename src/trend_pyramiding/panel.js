@@ -180,34 +180,21 @@ async function submitManualEntry() {
 
 function renderEntryCandidates(s) {
   const candidates = s.entry_candidates || [];
-  const now = Date.now() / 1000;
   $('candidate-count').textContent = candidates.length + ' 个候选';
   $('empty-candidates').hidden = candidates.length > 0;
   $('candidate-body').replaceChildren(...candidates.map(candidate => {
     const tr = document.createElement('tr');
-    const remaining = Math.max(0, Math.ceil(Number(candidate.expires_at) - now));
-    const values = [
-      candidate.instrument,
-      date(candidate.bar),
-      num(candidate.signal_close),
-      num(candidate.stop),
-      candidate.indicative_contracts,
-      remaining > 0 ? remaining + ' 秒' : '已失效',
-    ];
-    values.forEach(value => {
-      const td = document.createElement('td');
-      td.textContent = value;
-      tr.append(td);
-    });
+    const instrumentCell = document.createElement('td');
+    instrumentCell.textContent = candidate.instrument;
     const actionCell = document.createElement('td');
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'candidate-open';
     button.textContent = '开仓';
-    button.disabled = !s.entry_approval_enabled || remaining <= 0 || actionBusy;
+    button.disabled = !s.entry_approval_enabled || actionBusy;
     button.addEventListener('click', () => approveEntry(candidate.id, candidate.instrument));
     actionCell.append(button);
-    tr.append(actionCell);
+    tr.append(instrumentCell, actionCell);
     return tr;
   }));
   if (s.entry_candidate_error) {
@@ -217,10 +204,10 @@ function renderEntryCandidates(s) {
   } else if (s.candidate_scan_pending) {
     $('candidate-feedback').textContent = '正在扫描交易所全部受支持的 USDT 永续合约…';
   } else if (!s.entry_approval_enabled && candidates.length) {
-    $('candidate-feedback').textContent = '当前状态暂不能批准新开仓，请先处理异常暂停或待核对订单。';
+    $('candidate-feedback').textContent = '当前状态暂不能开仓，请先处理异常暂停或待核对订单。';
   } else if (!$('candidate-feedback').dataset.locked) {
     $('candidate-feedback').textContent = candidates.length
-      ? '本次扫描候选只在当前有效期内可确认。'
+      ? '这里只列出符合策略条件的币种；点击“开仓”时会按最新行情重新核验并计算止损和张数。'
       : '不会因新 K 线自动扫描；需要时点击“生成候选”。';
   }
 }
