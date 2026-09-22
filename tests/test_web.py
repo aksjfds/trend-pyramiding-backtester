@@ -214,6 +214,10 @@ def test_http_page_assets_status_and_no_secret_exposure(server):
     assert 'id="strategy-basic-settings"' in page
     assert 'id="advanced-settings"' in page
     assert page.count('class="primary settings-save"') == 2
+    assert "符合策略的币种" in page
+    assert "信号收盘价" not in page
+    assert "预计张数" not in page
+    assert "剩余确认时间" not in page
     assert headers["Cache-Control"] == "no-store"
     assert headers["X-Frame-Options"] == "DENY"
     assert server.token in page
