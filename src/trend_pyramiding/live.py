@@ -994,7 +994,7 @@ class SwapRunner:
                 raise ValueError("strategy_stop_unavailable")
             stop = float(rounded(stop, instrument.tick))
             bid, ask, last = self.quote_prices(market)
-        except (MarketUnavailable, TransientRead, ValueError) as exc:
+        except (MarketUnavailable, TransientRead, ValueError, OKXError) as exc:
             self.store.event(
                 "manual_entry_rejected",
                 request_id=request_id,
