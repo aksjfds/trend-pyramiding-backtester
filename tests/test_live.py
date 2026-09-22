@@ -833,7 +833,7 @@ def test_expired_manual_approval_never_opens(runner):
     assert not runner.client.orders
     assert runner.candidate_store.load()["candidates"] == []
     approvals = runner.approval_store.load()["approvals"]
-    assert candidate_id not in approvals
+    assert candidate_id not in [str(item.get("id")) for item in approvals if isinstance(item, dict)]
 
 
 def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(runner):
