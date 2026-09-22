@@ -194,6 +194,14 @@ def runner(tmp_path, monkeypatch):
     return bot
 
 
+def approve_first_candidate(bot):
+    data = bot.candidate_store.load()
+    assert data and data["candidates"]
+    candidate_id = data["candidates"][0]["id"]
+    bot.approval_store.save({"version": 1, "approvals": [candidate_id]})
+    return candidate_id
+
+
 def submit(bot):
     bot._order(
         MARKET,
@@ -357,12 +365,21 @@ def test_candles_use_confirmed_only_and_reject_gaps():
         closed_candles(exchange, MARKET, BacktestConfig())
 
 
-def test_step_consumes_bar_once_and_attaches_stop(runner):
+def test_step_creates_candidate_then_manual_approval_opens_with_stop(runner):
+    runner.step()
+    assert not runner.client.orders
+    candidates = runner.candidate_store.load()["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["instrument"] == MARKET
+
+    approve_first_candidate(runner)
     runner.step()
     entries = [p for path, p in runner.client.posts if path.endswith("trade/order")]
     assert len(entries) == 1
     assert entries[0]["ordType"] == "fok"
     assert entries[0]["attachAlgoOrds"][0]["slOrdPx"] == "-1"
+    assert runner.candidate_store.load()["candidates"] == []
+
     runner.step()
     assert len(runner.client.orders) == 1
 
@@ -671,6 +688,8 @@ def test_wide_spread_recovers_same_bar_without_duplicate_order(runner, monkeypat
     assert events.count("market_deferred") == 1
     bad = False
     runner.step()
+    assert runner.candidate_store.load()["candidates"]
+    approve_first_candidate(runner)
     runner.step()
     assert len(runner.client.orders) == 1
     assert not runner.market_warnings
@@ -694,7 +713,8 @@ def test_one_market_data_failure_does_not_block_other_market(runner, monkeypatch
 
     monkeypatch.setattr(runner.client, "get", get)
     runner.step()
-    assert len(runner.client.orders) == 1
+    assert not runner.client.orders
+    assert runner.candidate_store.load()["candidates"][0]["instrument"] == MARKET
     assert broken in runner.market_warnings
     assert runner.state["markets"][broken]["last_bar"] is None
 
@@ -728,10 +748,12 @@ def test_unknown_held_market_valuation_blocks_entries_but_maintains_stops(runner
 
 def test_stale_same_candle_is_reported_without_new_order(runner):
     runner.step()
+    assert runner.candidate_store.load()["candidates"]
     runner.client.clock += 7200
     runner.step()
     assert MARKET in runner.market_warnings
-    assert len(runner.client.orders) == 1
+    assert not runner.client.orders
+    assert runner.candidate_store.load()["candidates"] == []
 
 
 def test_event_rotation_does_not_modify_order_state(tmp_path):
@@ -745,3 +767,43 @@ def test_event_rotation_does_not_modify_order_state(tmp_path):
     assert store.load() == state
     assert json.loads(events.read_text())["event"] == "test_rotation"
     assert events.with_name(events.name + ".1").stat().st_size == 5 * 1024 * 1024
+
+
+def test_expired_manual_approval_never_opens(runner):
+    runner.step()
+    candidate_id = approve_first_candidate(runner)
+    runner.client.clock += runner.config.max_signal_age_seconds + 1
+    runner.step()
+    assert not runner.client.orders
+    assert runner.candidate_store.load()["candidates"] == []
+    approvals = runner.approval_store.load()["approvals"]
+    assert candidate_id not in approvals
+
+
+def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(runner):
+    runner.step()
+    approve_first_candidate(runner)
+    runner.step()
+    assert runner.state["markets"][MARKET]["position"] is not None
+
+    runner.client.clock += 3600
+    original = runner.client.get
+
+    def get(path, params=None, **kwargs):
+        if path.endswith("market/ticker"):
+            return [{"bidPx": "130.0", "askPx": "130.1", "ts": str(int(runner.client.clock * 1000))}]
+        if path.endswith("market/candles"):
+            rows = original(path, params, **kwargs)
+            for row in rows:
+                if row[8] == "0":
+                    continue
+                row[2] = str(max(float(row[2]), 130.0))
+                row[4] = str(max(float(row[4]), 130.0))
+                break
+            return rows
+        return original(path, params, **kwargs)
+
+    runner.client.get = get
+    before = len(runner.client.orders)
+    runner.step()
+    assert len(runner.client.orders) >= before
