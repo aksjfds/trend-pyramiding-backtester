@@ -50,7 +50,7 @@ comparison.json 包含：
 
 ## 安装
 
-OKX 实盘功能已提供独立命令 `pyramid-okx`，支持逐仓 USDT 永续合约，周期、杠杆和本金使用比例可在网页“资金与策略设置”中修改；总额度包含保证金和费用预留。详见 [OKX 配置与运行说明](docs/OKX_LIVE.md)。账户只读检查与实盘启动分开，实盘需要明确点击网页的“启动实盘交易”，或执行 `pyramid-okx run --live`。
+OKX 实盘功能已提供独立命令 `pyramid-okx`，支持逐仓 USDT 永续合约，周期、杠杆和本金使用比例可直接在顶部“策略参数”和“资金使用上限”卡片中修改；总额度包含保证金和费用预留。详见 [OKX 配置与运行说明](docs/OKX_LIVE.md)。账户只读检查与实盘启动分开，实盘需要明确点击网页的“启动实盘交易”，或执行 `pyramid-okx run --live`。
 
 ```bash
 python -m venv .venv
