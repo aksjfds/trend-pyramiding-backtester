@@ -11,14 +11,12 @@
 <header><div class="breadcrumb">工作空间 <span>/</span> 策略总览</div><div class="connection" id="connection">正在连接服务…</div></header>
 <div class="page-heading"><div><div class="eyebrow">STRATEGY OVERVIEW</div><h1>让趋势运行。</h1><p>启动策略，查看持仓，掌握每一次加仓与止损。</p></div><div class="badge neutral" id="run-badge" role="status">正在读取</div></div>
 <div id="error" class="notice error" role="alert" hidden></div><div id="warning" class="notice" role="status" hidden></div>
-<form id="settings-form">
 <section class="metrics" aria-label="策略概况">
 <article class="metric"><span>账户权益 <small>USDT 估值</small></span><strong id="equity">—</strong><div id="account-time">正在读取账户…</div></article>
-<article class="metric editable-metric capital-metric"><span>资金使用上限</span><strong id="allocation">20<span>%</span></strong><div id="budget">保证金与手续费预留</div><div class="metric-settings-grid" id="capital-settings"></div><div class="metric-settings-actions"><button class="primary settings-save" type="submit" disabled>保存</button><button class="secondary settings-reset" type="button" disabled>撤销</button></div></article>
+<article class="metric"><span>资金使用上限 <button class="text-button" id="edit-capital" type="button">修改</button></span><strong id="allocation" tabindex="-1">20<span>%</span></strong><div id="budget">保证金与手续费预留</div></article>
 <article class="metric"><span>策略持仓</span><strong id="position-count">0<span> 个币对</span></strong><div id="pending">策略保存的记录</div></article>
-<article class="metric editable-metric strategy-metric"><span>策略参数</span><strong class="parameters"><span id="bar">1H</span><i>/</i><span id="leverage">2×</span></strong><div>只做多 · 逐仓 · 顺势加仓</div><div class="metric-settings-grid" id="strategy-basic-settings"></div><details class="strategy-advanced"><summary>高级策略参数</summary><p class="hint">风险预算以每个币种分配到的资金为基数；R 表示初始止损距离。各档比例分别合计不超过 100%，档数必须相同。</p><div class="metric-settings-grid advanced" id="advanced-settings"></div></details><p class="hint settings-note"></p><div class="metric-settings-actions"><button class="primary settings-save" type="submit" disabled>保存参数</button><button class="secondary settings-reset" type="button" disabled>撤销</button></div><p class="hint settings-feedback" role="status"></p></article>
+<article class="metric"><span>策略参数 <button class="text-button" id="edit-strategy" type="button">修改</button></span><strong class="parameters"><span id="bar" tabindex="-1">1H</span><i>/</i><span id="leverage" tabindex="-1">2×</span></strong><div>只做多 · 逐仓 · 顺势加仓</div></article>
 </section>
-</form>
 <div class="control-grid">
 <section class="card control"><div class="section-heading"><h2>运行控制</h2><span id="profile" class="tag">实盘账户</span></div>
 <label for="mode">运行方式</label><select id="mode"><option value="watch">只读观察 · 实盘账户</option><option value="demo-watch">只读观察 · 模拟账户</option><option value="demo">模拟交易</option><option value="live">实盘交易</option></select>
