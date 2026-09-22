@@ -265,37 +265,7 @@ def test_web_session_lock_prevents_second_controller(tmp_path):
                 pass
 
 
-def test_coin_selection_survives_restart_and_is_used_by_runner_config(controller, monkeypatch):
-    from trend_pyramiding.live import selected_config
-
-    monkeypatch.setattr(controller, "catalog", lambda mode: [{"instrument": "HYPE-USDT-SWAP"}])
-    controller.save_selection("watch", ["HYPE-USDT-SWAP"])
-    reopened = web.Controller(controller.config_path, controller.state_dir)
-    assert reopened.snapshot()["selection"]["instruments"] == ["HYPE-USDT-SWAP"]
-    assert selected_config(reopened.config, reopened.store(False)).instruments == (
-        "HYPE-USDT-SWAP",
-    )
-    assert reopened.snapshot("demo")["selection"]["instruments"] == []
-    reopened.save_selection("watch", [])
-    assert selected_config(reopened.config, reopened.store(False)).instruments == ()
-
-
-def test_coin_selection_rejects_unknown_duplicate_or_unsafe_changes(controller, monkeypatch):
-    monkeypatch.setattr(controller, "catalog", lambda mode: [{"instrument": "BTC-USDT-SWAP"}])
-    for selection in (None, "BTC", [1], ["FAKE-USDT-SWAP"], ["BTC-USDT-SWAP"] * 2):
-        with pytest.raises(ValueError):
-            controller.save_selection("watch", selection)
-    controller.store(False).save(
-        {"version": 1, "pending": None, "markets": {"BTC-USDT-SWAP": {"position": {"qty": "1"}}}}
-    )
-    with pytest.raises(ValueError, match="持仓"):
-        controller.save_selection("watch", [])
-    controller.store(False).save({"version": 1, "pending": {"order": "unknown"}, "markets": {}})
-    with pytest.raises(ValueError, match="待核对"):
-        controller.save_selection("watch", [])
-
-
-def test_selection_http_end_to_end(server, monkeypatch):
+def test_instrument_catalog_remains_available_for_manual_entry(server, monkeypatch):
     monkeypatch.setattr(
         server.controller,
         "catalog",
@@ -303,19 +273,28 @@ def test_selection_http_end_to_end(server, monkeypatch):
     )
     headers = {"X-Panel-Token": server.token}
     status, _, body = request(server, "GET", "/api/instruments", **headers)
-    assert status == 200 and json.loads(body)["items"][0]["instrument"] == "BTC-USDT-SWAP"
-    assert (
-        request(
-            server,
-            "POST",
-            "/api/selection",
-            {"mode": "watch", "instruments": ["BTC-USDT-SWAP"]},
-            **headers,
-        )[0]
-        == 200
+    assert status == 200
+    assert json.loads(body)["items"][0]["instrument"] == "BTC-USDT-SWAP"
+
+
+def test_selection_endpoint_and_snapshot_are_removed(server, controller):
+    headers = {"X-Panel-Token": server.token, "Origin": server.origin}
+    status, _, _ = request(
+        server,
+        "POST",
+        "/api/selection",
+        {"mode": "watch", "instruments": ["BTC-USDT-SWAP"]},
+        **headers,
     )
-    assert server.controller.snapshot()["selection"]["instruments"] == ["BTC-USDT-SWAP"]
-    assert server.controller.process is None
+    assert status == 404
+    assert "selection" not in controller.snapshot("watch")
+
+
+def test_legacy_selection_file_is_ignored(controller):
+    controller.store(False).path.with_suffix(".selection.json").write_text("invalid json")
+    report = controller.snapshot()
+    assert report["state_error"] is None
+    assert "selection" not in report
 
 
 def test_open_command_reuses_only_matching_panel(server, tmp_path):
@@ -331,14 +310,6 @@ def test_catalog_concurrency_does_not_block_health_workers(controller):
     with controller.catalog_lock:
         with pytest.raises(ValueError, match="正在刷新"):
             controller.catalog()
-
-
-def test_invalid_selection_remains_visible_and_prevents_selection(controller):
-    controller.store(False).path.with_suffix(".selection.json").write_text("invalid json")
-    report = controller.snapshot()
-    assert report["state_error"]
-    assert report["selection"]["locked"]
-    assert report["running"] is False
 
 
 def test_settings_http_save_refresh_and_separate_profile(server):
