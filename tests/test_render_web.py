@@ -52,13 +52,13 @@ def request(app, path="/", method="GET", body=b"", login=True, **changes):
 
 
 @pytest.mark.parametrize(
-    "path", ["/", "/panel.js", "/panel.css", "/api/status", "/api/connectivity", "/api/start", "/api/stop", "/api/check", "/api/approve-entry", "/api/generate-candidates"]
+    "path", ["/", "/panel.js", "/panel.css", "/api/status", "/api/connectivity", "/api/start", "/api/stop", "/api/check", "/api/approve-entry", "/api/generate-candidates", "/api/manual-entry"]
 )
 def test_every_panel_resource_requires_authentication(app, path):
     result = request(
         app,
         path,
-        method="POST" if path in ("/api/start", "/api/stop", "/api/check", "/api/approve-entry", "/api/generate-candidates") else "GET",
+        method="POST" if path in ("/api/start", "/api/stop", "/api/check", "/api/approve-entry", "/api/generate-candidates", "/api/manual-entry") else "GET",
         login=False,
     )
     assert result.code == 401
@@ -370,3 +370,17 @@ def test_render_generate_candidates_endpoint(app, monkeypatch):
     assert response.code == 200
     assert json.loads(response.body)["ok"] is True
     assert calls == ["live"]
+
+
+def test_render_manual_entry_endpoint(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app.controller,
+        "request_manual_entry",
+        lambda mode, instrument: calls.append((mode, instrument)),
+    )
+    body = json.dumps({"mode": "live", "instrument": "HYPE-USDT-SWAP"}).encode()
+    response = request(app, "/api/manual-entry", "POST", body)
+    assert response.code == 200
+    assert json.loads(response.body)["ok"] is True
+    assert calls == [("live", "HYPE-USDT-SWAP")]
