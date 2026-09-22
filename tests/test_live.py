@@ -551,6 +551,8 @@ def test_candidate_scan_reuses_instrument_and_fee_metadata_cache(runner, monkeyp
         return rows
 
     monkeypatch.setattr(runner.client, "get", get)
+    runner.instrument_catalog_complete = False
+    runner.instrument_catalog_loaded_at = 0
 
     request_candidate_scan(runner)
     runner.step()
@@ -574,6 +576,8 @@ def test_candidate_scan_checks_all_supported_markets_not_only_managed(runner, mo
         return rows
 
     monkeypatch.setattr(runner.client, "get", get)
+    runner.instrument_catalog_complete = False
+    runner.instrument_catalog_loaded_at = 0
     pulses = []
     runner.keepalive = lambda: pulses.append(True)
 
