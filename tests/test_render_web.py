@@ -380,10 +380,18 @@ def test_render_manual_entry_endpoint(app, monkeypatch):
     monkeypatch.setattr(
         app.controller,
         "request_manual_entry",
-        lambda mode, instrument: calls.append((mode, instrument)),
+        lambda mode, instrument, capital_fraction: calls.append(
+            (mode, instrument, capital_fraction)
+        ),
     )
-    body = json.dumps({"mode": "live", "instrument": "HYPE-USDT-SWAP"}).encode()
+    body = json.dumps(
+        {
+            "mode": "live",
+            "instrument": "HYPE-USDT-SWAP",
+            "capital_fraction": 0.25,
+        }
+    ).encode()
     response = request(app, "/api/manual-entry", "POST", body)
     assert response.code == 200
     assert json.loads(response.body)["ok"] is True
-    assert calls == [("live", "HYPE-USDT-SWAP")]
+    assert calls == [("live", "HYPE-USDT-SWAP", 0.25)]
