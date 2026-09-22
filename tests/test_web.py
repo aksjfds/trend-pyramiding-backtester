@@ -488,6 +488,8 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     snapshot = controller.snapshot("live")
     assert snapshot["entry_candidates"] == [candidate]
     assert snapshot["entry_approval_enabled"] is True
+    assert snapshot["candidate_scan_enabled"] is True
+    assert snapshot["candidate_scan_pending"] is False
 
     controller.approve_entry("live", "candidate-1")
     assert controller.approval_store(False).load()["approvals"] == ["candidate-1"]
@@ -537,3 +539,47 @@ def test_manual_entry_approval_http_endpoint(server, monkeypatch):
     )
     assert status == 200 and json.loads(body)["ok"] is True
     assert calls == [("live", "candidate-1")]
+
+
+def test_manual_candidate_scan_request_is_queued_only_in_trading_mode(controller):
+    from types import SimpleNamespace
+
+    controller.process = SimpleNamespace(
+        poll=lambda: None,
+        send_signal=lambda *_: None,
+        wait=lambda: 0,
+    )
+    controller.mode = "live"
+
+    controller.request_candidate_scan("live")
+    queued = controller.candidate_scan_store(False).load()
+    assert queued["request"]["id"]
+    assert queued["request"]["requested_at"] > 0
+    assert controller.snapshot("live")["candidate_scan_pending"] is True
+
+    with pytest.raises(ValueError, match="已提交"):
+        controller.request_candidate_scan("live")
+
+    controller.mode = "watch"
+    controller.candidate_scan_store(False).save({"version": 1, "request": None})
+    with pytest.raises(ValueError, match="只读"):
+        controller.request_candidate_scan("watch")
+
+
+def test_generate_candidates_http_endpoint(server, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.controller,
+        "request_candidate_scan",
+        lambda mode: calls.append(mode),
+    )
+    headers = {"X-Panel-Token": server.token, "Origin": server.origin}
+    status, _, body = request(
+        server,
+        "POST",
+        "/api/generate-candidates",
+        {"mode": "live"},
+        **headers,
+    )
+    assert status == 200 and json.loads(body)["ok"] is True
+    assert calls == ["live"]
