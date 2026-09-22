@@ -794,16 +794,31 @@ def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(ru
             return [{"bidPx": "130.0", "askPx": "130.1", "ts": str(int(runner.client.clock * 1000))}]
         if path.endswith("market/candles"):
             rows = original(path, params, **kwargs)
-            for row in rows:
-                if row[8] == "0":
-                    continue
-                row[2] = str(max(float(row[2]), 130.0))
-                row[4] = str(max(float(row[4]), 130.0))
-                break
+            rows[0][8] = "1"
+            rows[0][1] = "129.0"
+            rows[0][2] = "131.0"
+            rows[0][3] = "128.5"
+            rows[0][4] = "130.0"
+            next_ts = pd.Timestamp("2026-01-06T01:00:00Z")
+            rows.insert(
+                0,
+                [
+                    str(next_ts.value // 1000000),
+                    "130.0",
+                    "130.2",
+                    "129.8",
+                    "130.1",
+                    "1000",
+                    "0",
+                    "0",
+                    "0",
+                ],
+            )
             return rows
         return original(path, params, **kwargs)
 
     runner.client.get = get
     before = len(runner.client.orders)
     runner.step()
-    assert len(runner.client.orders) >= before
+    assert len(runner.client.orders) == before + 1
+    assert len(runner.state["markets"][MARKET]["position"]["legs"]) == 2
