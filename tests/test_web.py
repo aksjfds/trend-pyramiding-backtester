@@ -209,6 +209,11 @@ def request(server, method, path, body=None, **headers):
 def test_http_page_assets_status_and_no_secret_exposure(server):
     status, headers, page = request(server, "GET", "/")
     assert status == 200 and "策略控制台" in page
+    assert "资金与策略设置" not in page
+    assert 'id="capital-settings"' in page
+    assert 'id="strategy-basic-settings"' in page
+    assert 'id="advanced-settings"' in page
+    assert page.count('class="primary settings-save"') == 2
     assert headers["Cache-Control"] == "no-store"
     assert headers["X-Frame-Options"] == "DENY"
     assert server.token in page
