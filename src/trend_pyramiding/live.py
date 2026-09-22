@@ -33,6 +33,7 @@ from .runtime import safe_console_print
 from .signals import breakout_long_signal
 
 CONTROL_COMMAND_TTL_SECONDS = 30
+INSTRUMENT_CACHE_SECONDS = 60
 
 BAR_SECONDS = {
     "15m": 900,
@@ -415,6 +416,10 @@ class SwapRunner:
         self.state = None
         self.instruments = {}
         self.fees = {}
+        self.fee_cache = {}
+        self.instrument_catalog = {}
+        self.instrument_catalog_loaded_at = 0.0
+        self.instrument_catalog_complete = False
         self.market_warnings = {}
         self.stop_requested = lambda: False
         self.keepalive = lambda: None
@@ -427,11 +432,38 @@ class SwapRunner:
     def save(self):
         self.store.save(self.state)
 
+    def _supported_catalog(self) -> dict[str, Instrument]:
+        now = time.monotonic()
+        if (
+            self.instrument_catalog_complete
+            and now - self.instrument_catalog_loaded_at <= INSTRUMENT_CACHE_SECONDS
+        ):
+            return self.instrument_catalog
+        items = supported_instruments(self.client)
+        self.instrument_catalog = {item.inst_id: item for item in items}
+        self.instrument_catalog_loaded_at = now
+        self.instrument_catalog_complete = True
+        return self.instrument_catalog
+
+    def _fee_rate(self, instrument: Instrument) -> float:
+        key = (
+            ("group", instrument.fee_group)
+            if instrument.fee_group
+            else ("family", instrument.inst_id.removesuffix("-SWAP"))
+        )
+        if key not in self.fee_cache:
+            self.fee_cache[key] = max(
+                taker_fee(self.client, instrument), self.strategy.fee_bps / 10000
+            )
+        return self.fee_cache[key]
+
     def _ensure_managed_market(self, market: str) -> Instrument:
         existing = self.instruments.get(market)
         if existing is not None:
             return existing
-        instrument = universe(self.client, 1, (market,))[0]
+        instrument = self._supported_catalog().get(market)
+        if instrument is None:
+            raise ValueError("a configured instrument is unavailable or unsupported")
         if self.actual_position(market) != 0:
             raise ValueError("unexpected_existing_position")
         self.client.post(
@@ -448,11 +480,9 @@ class SwapRunner:
         )
         if not info or any(dec(x["lever"]) != self.config.leverage for x in info):
             raise ValueError("configured isolated leverage verification failed")
-        fee_rate = max(
-            taker_fee(self.client, instrument), self.strategy.fee_bps / 10000
-        )
         self.instruments[market] = instrument
-        self.fees[market] = fee_rate
+        self.instrument_catalog[market] = instrument
+        self.fees[market] = self._fee_rate(instrument)
         self.state["markets"][market] = {"last_bar": None, "position": None}
         self.save()
         self.store.event("market_adopted", instrument=market)
@@ -501,6 +531,7 @@ class SwapRunner:
         )
         selected = universe(self.client, self.config.top_n, requested)
         self.instruments = {i.inst_id: i for i in selected}
+        self.instrument_catalog.update(self.instruments)
         positions = self.client.get("/api/v5/account/positions")
         if not self.state or selection_changed:
             if any(dec(p.get("pos") or "0") != 0 for p in positions):
@@ -551,9 +582,7 @@ class SwapRunner:
             )
             if not info or any(dec(x["lever"]) != self.config.leverage for x in info):
                 raise ValueError("configured isolated leverage verification failed")
-            self.fees[instrument.inst_id] = max(
-                taker_fee(self.client, instrument), self.strategy.fee_bps / 10000
-            )
+            self.fees[instrument.inst_id] = self._fee_rate(instrument)
         try:
             saved_candidates = self.candidate_store.load() or {"version": 1, "candidates": []}
             candidates = saved_candidates.get("candidates", [])
@@ -730,10 +759,7 @@ class SwapRunner:
         skipped = 0
         found = 0
         try:
-            scan_map = {
-                instrument.inst_id: instrument
-                for instrument in supported_instruments(self.client)
-            }
+            scan_map = dict(self._supported_catalog())
             scan_map.update(self.instruments)
             scan_instruments = [scan_map[key] for key in sorted(scan_map)]
             self.store.event(
@@ -782,10 +808,7 @@ class SwapRunner:
                     bid, ask = self.quote(market)
                     fee_rate = self.fees.get(market)
                     if fee_rate is None:
-                        fee_rate = max(
-                            taker_fee(self.client, instrument),
-                            self.strategy.fee_bps / 10000,
-                        )
+                        fee_rate = self._fee_rate(instrument)
                 except (MarketUnavailable, TransientRead, ValueError, OKXError) as exc:
                     if item is not None and isinstance(exc, (MarketUnavailable, TransientRead)):
                         self.market_warning(market, exc)
@@ -1340,18 +1363,30 @@ class SwapRunner:
             else:
                 self.verify_protection(market)
 
+    def _position_quantities(self, rows) -> dict[str, Decimal]:
+        quantities = {market: dec(0) for market in self.instruments}
+        for row in rows:
+            market = row.get("instId")
+            if market not in quantities:
+                continue
+            quantity = dec(row.get("pos") or "0")
+            if quantity == 0:
+                continue
+            if (
+                row.get("mgnMode") != "isolated"
+                or row.get("posSide") != "net"
+                or quantity < 0
+                or dec(row["lever"]) != self.config.leverage
+            ):
+                raise RuntimeError(
+                    "unexpected position mode, direction or leverage; inspect OKX"
+                )
+            quantities[market] += quantity
+        return quantities
+
     def actual_position(self, market):
         rows = self.client.get("/api/v5/account/positions", {"instId": market})
-        rows = [p for p in rows if dec(p.get("pos") or "0") != 0]
-        if any(
-            p.get("mgnMode") != "isolated"
-            or p.get("posSide") != "net"
-            or dec(p["pos"]) < 0
-            or dec(p["lever"]) != self.config.leverage
-            for p in rows
-        ):
-            raise RuntimeError("unexpected position mode, direction or leverage; inspect OKX")
-        return sum((dec(p["pos"]) for p in rows), dec(0))
+        return self._position_quantities(rows).get(market, dec(0))
 
     def stop_details(self, stop_id):
         return self.client.get("/api/v5/trade/order-algo", {"algoClOrdId": stop_id})[0]
@@ -1376,8 +1411,9 @@ class SwapRunner:
                         raise
                     protected = False
             if protected:
-                position["unsafe"] = False
-                self.save()
+                if position.get("unsafe"):
+                    position["unsafe"] = False
+                    self.save()
                 return
             if self.actual_position(market) == 0:
                 self.cleanup_flat(market)
@@ -1431,9 +1467,8 @@ class SwapRunner:
             )
         raise RuntimeError(f"runner stopped after emergency exit for {market}: {reason}")
 
-    def reconcile(self, market):
+    def _reconcile_actual(self, market, actual):
         position = self.state["markets"][market]["position"]
-        actual = self.actual_position(market)
         if position is None:
             if actual:
                 raise RuntimeError("untracked exchange position; no new orders allowed")
@@ -1446,6 +1481,9 @@ class SwapRunner:
                 "position quantity differs from state; inspect fills before restarting"
             )
         self.verify_protection(market)
+
+    def reconcile(self, market):
+        self._reconcile_actual(market, self.actual_position(market))
 
     def trail(self, market, row):
         position = self.state["markets"][market]["position"]
@@ -1528,10 +1566,12 @@ class SwapRunner:
             self.finish_order()
         if self.client.get("/api/v5/trade/orders-pending"):
             raise RuntimeError("unexpected pending ordinary orders; reconcile before trading")
+        position_rows = self.client.get("/api/v5/account/positions")
+        actual_positions = self._position_quantities(position_rows)
         for market in self.instruments:
             if stop_requested():
                 return
-            self.reconcile(market)
+            self._reconcile_actual(market, actual_positions[market])
 
         account = account_snapshot(self.client)
         budget = min(
@@ -1574,6 +1614,11 @@ class SwapRunner:
             position = item["position"]
             if position is None:
                 continue
+            if item["last_bar"] is not None and market not in self.market_warnings:
+                seconds = BAR_SECONDS[self.config.bar]
+                latest_possible = int(self.client.now() // seconds) * seconds - seconds
+                if pd.Timestamp(item["last_bar"]).timestamp() >= latest_possible:
+                    continue
             try:
                 frame = closed_candles(self.client, market, self.strategy, self.config.bar)
             except (MarketUnavailable, TransientRead) as exc:
