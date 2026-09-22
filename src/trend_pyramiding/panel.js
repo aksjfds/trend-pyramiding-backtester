@@ -40,12 +40,17 @@ function controls() {
     last?.candidate_scan_pending ? '生成中…' : '生成候选';
   $('manual-entry-instrument').disabled =
     !connected || !last?.manual_entry_enabled || !!last?.manual_entry_pending || actionBusy;
+  $('manual-entry-fraction').disabled =
+    !connected || !last?.manual_entry_enabled || !!last?.manual_entry_pending || actionBusy;
+  const manualFraction = Number($('manual-entry-fraction').value);
+  const manualFractionValid = Number.isFinite(manualFraction) && manualFraction > 0 && manualFraction <= 100;
   $('manual-entry-submit').disabled =
     !connected ||
     !last?.manual_entry_enabled ||
     !!last?.manual_entry_pending ||
     actionBusy ||
-    !$('manual-entry-instrument').value;
+    !$('manual-entry-instrument').value ||
+    !manualFractionValid;
   $('manual-entry-submit').textContent =
     last?.manual_entry_pending ? '提交中…' : '开仓并交给策略接管';
   const locked = !!last?.selection?.locked || !!last?.external_process?.length;
@@ -114,10 +119,17 @@ function render(s) {
 function renderManualEntry(s) {
   const select = $('manual-entry-instrument');
   const previous = select.value;
-  const instruments = s.manual_entry_instruments || [];
+  const held = new Set(
+    (s.markets || [])
+      .filter(row => Number(row.contracts || 0) > 0)
+      .map(row => row.instrument)
+  );
+  const managed = (s.manual_entry_instruments || []).filter(instrument => !held.has(instrument));
+  const catalog = marketCatalog.map(item => item.instrument).filter(instrument => !held.has(instrument));
+  const instruments = [...managed, ...catalog.filter(instrument => !managed.includes(instrument))];
   select.replaceChildren(Object.assign(document.createElement('option'), {
     value: '',
-    textContent: instruments.length ? '选择当前管理币种' : '暂无可手动开仓币种',
+    textContent: instruments.length ? '选择可交易币种' : '正在加载可交易币种…',
   }));
   instruments.forEach(instrument => {
     const option = document.createElement('option');
@@ -128,28 +140,37 @@ function renderManualEntry(s) {
   if (instruments.includes(previous)) select.value = previous;
 
   if (s.manual_entry_pending) {
-    $('manual-entry-note').textContent = '手动开仓请求已提交，worker 正在重新检查行情、止损、预算和最小张数。';
+    $('manual-entry-note').textContent = '手动开仓请求已提交，worker 正在核验最新 K 线、初始止损、账户余额和交易所最小张数。';
   } else if (!s.running) {
-    $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，才能对当前管理币种手动开仓。';
+    $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，选择币种和资金使用比例即可手动开仓。';
   } else if (!s.manual_entry_enabled) {
     $('manual-entry-note').textContent = '当前状态不能手动开仓，请先处理异常暂停、待核对订单或等待策略准备完成。';
   } else {
-    $('manual-entry-note').textContent = '不要求该币进入候选列表；程序使用最新已收盘 K 线计算策略初始止损和下单张数，成交后由策略接管。';
+    $('manual-entry-note').textContent = '不要求进入候选列表；本次首仓直接按所选资金比例计算张数，成交后由策略接管加仓、止损和退出。';
   }
 }
 
 async function submitManualEntry() {
   const instrument = $('manual-entry-instrument').value;
-  if (!instrument || actionBusy || last?.manual_entry_pending) return;
+  const percent = Number($('manual-entry-fraction').value);
+  if (
+    !instrument ||
+    !Number.isFinite(percent) ||
+    percent <= 0 ||
+    percent > 100 ||
+    actionBusy ||
+    last?.manual_entry_pending
+  ) return;
   actionBusy = true;
-  $('manual-entry-note').textContent = '正在提交 ' + instrument + ' 手动开仓请求…';
+  $('manual-entry-note').textContent = `正在提交 ${instrument}，本次首仓使用 ${percent}% 策略资金…`;
   controls();
   try {
     await api('/api/manual-entry', {
       mode: $('mode').value,
       instrument,
+      capital_fraction: percent / 100,
     });
-    $('manual-entry-note').textContent = instrument + ' 已提交，worker 将重新核验后执行。';
+    $('manual-entry-note').textContent = `${instrument} 已提交（${percent}%），worker 将按当前价格核验后直接开仓。`;
   } catch (error) {
     $('manual-entry-note').textContent = '手动开仓失败：' + error.message;
   } finally {
@@ -196,7 +217,7 @@ function renderEntryCandidates(s) {
   } else if (!s.running) {
     $('candidate-feedback').textContent = '启动模拟交易或实盘交易后，点击“生成候选”进行扫描。';
   } else if (s.candidate_scan_pending) {
-    $('candidate-feedback').textContent = '正在扫描全部已选币种…';
+    $('candidate-feedback').textContent = '正在扫描交易所全部受支持的 USDT 永续合约…';
   } else if (!s.entry_approval_enabled && candidates.length) {
     $('candidate-feedback').textContent = '当前状态暂不能批准新开仓，请先处理异常暂停或待核对订单。';
   } else if (!$('candidate-feedback').dataset.locked) {
@@ -348,7 +369,7 @@ async function loadMarkets() {
     if (last?.profile !== profile) return;
     marketCatalog=data.items; catalogProfile=profile;
     $('catalog-status').textContent='可选 '+marketCatalog.length+' 个 USDT 永续合约 · 按 24 小时成交额排序';
-    renderMarkets(); controls();
+    renderMarkets(); if (last) renderManualEntry(last); controls();
   } catch(error) {catalogProfile=profile;$('catalog-status').textContent='币种加载失败：'+error.message+'，请点击刷新币种重试。';}
   finally {catalogLoading=false;}
 }
@@ -356,6 +377,7 @@ $('check').addEventListener('click',()=>{message('');checkAccount();});
 $('refresh-network').addEventListener('click',()=>refreshNetwork());
 $('generate-candidates').addEventListener('click',()=>generateCandidates());
 $('manual-entry-instrument').addEventListener('change',()=>controls());
+$('manual-entry-fraction').addEventListener('input',()=>controls());
 $('manual-entry-submit').addEventListener('click',()=>submitManualEntry());
 $('mode').addEventListener('change',()=>{message('');selectionDirty=false;settingsDirty=false;marketCatalog=[];catalogProfile=null;selectionProfile=null;controls();refresh();});
 $('selection-mode').addEventListener('change',()=>{selectionDirty=true;$('selection-feedback').textContent='';syncSelection(last);controls();});
