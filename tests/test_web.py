@@ -467,7 +467,11 @@ def test_worker_stays_in_foreground_terminal_session(controller, monkeypatch):
 def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     from types import SimpleNamespace
 
-    controller.process = SimpleNamespace(poll=lambda: None)
+    controller.process = SimpleNamespace(
+        poll=lambda: None,
+        send_signal=lambda *_: None,
+        wait=lambda: 0,
+    )
     controller.mode = "live"
     candidate = {
         "id": "candidate-1",
@@ -495,7 +499,11 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
 def test_manual_entry_approval_rejected_in_readonly_mode(controller):
     from types import SimpleNamespace
 
-    controller.process = SimpleNamespace(poll=lambda: None)
+    controller.process = SimpleNamespace(
+        poll=lambda: None,
+        send_signal=lambda *_: None,
+        wait=lambda: 0,
+    )
     controller.mode = "watch"
     candidate = {
         "id": "candidate-1",
