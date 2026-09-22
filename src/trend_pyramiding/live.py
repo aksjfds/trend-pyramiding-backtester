@@ -40,6 +40,10 @@ CONTROL_COMMAND_TTL_SECONDS = 30
 INSTRUMENT_CACHE_SECONDS = 60
 CANDIDATE_SCAN_WORKERS = 8
 CANDIDATE_CANDLE_REQUESTS_PER_SECOND = 15
+MANUAL_STOP_MIN_ATR_MULT = 3.0
+MANUAL_STOP_MIN_DISTANCE_PCT = 0.005
+MANUAL_STOP_MAX_ATR_MULT = 5.0
+MANUAL_STOP_MAX_DISTANCE_PCT = 0.01
 
 BAR_SECONDS = {
     "15m": 900,
@@ -350,22 +354,39 @@ def closed_candles(
 
 
 def manual_initial_stop(row: pd.Series, strategy: BacktestConfig, entry_price: float):
-    """Return the tightest valid strategy stop below the actual manual entry price."""
+    """Return a buffered manual-entry stop below the actual executable entry price."""
     atr_value = float(row["atr"])
     structure_low = float(row["structure_low"])
-    if not math.isfinite(atr_value) or not math.isfinite(structure_low) or atr_value <= 0:
+    if (
+        not math.isfinite(atr_value)
+        or not math.isfinite(structure_low)
+        or atr_value <= 0
+        or not math.isfinite(entry_price)
+        or entry_price <= 0
+    ):
         return None
 
-    candidates = (
-        structure_low - strategy.structure_buffer_atr * atr_value,
-        entry_price - strategy.atr_stop_mult * atr_value,
+    structure_stop = structure_low - strategy.structure_buffer_atr * atr_value
+    structure_distance = (
+        entry_price - structure_stop
+        if math.isfinite(structure_stop) and 0 < structure_stop < entry_price
+        else 0.0
     )
-    valid = [
-        stop
-        for stop in candidates
-        if math.isfinite(stop) and 0 < stop < entry_price
-    ]
-    return max(valid) if valid else None
+
+    minimum_distance = max(
+        MANUAL_STOP_MIN_ATR_MULT * atr_value,
+        MANUAL_STOP_MIN_DISTANCE_PCT * entry_price,
+    )
+    maximum_distance = max(
+        minimum_distance,
+        min(
+            MANUAL_STOP_MAX_ATR_MULT * atr_value,
+            MANUAL_STOP_MAX_DISTANCE_PCT * entry_price,
+        ),
+    )
+    distance = min(max(minimum_distance, structure_distance), maximum_distance)
+    stop = entry_price - distance
+    return stop if math.isfinite(stop) and 0 < stop < entry_price else None
 
 
 def size_contracts(
@@ -1103,7 +1124,12 @@ class SwapRunner:
             capital_fraction=capital_fraction,
             selected_budget=selected_budget,
             bar=row["timestamp"].isoformat(),
+            entry_limit=float(limit),
+            atr=float(row["atr"]),
+            structure_low=float(row["structure_low"]),
             stop=stop,
+            stop_distance=float(limit) - stop,
+            stop_distance_pct=(float(limit) - stop) / float(limit),
         )
         self._order(
             market,
