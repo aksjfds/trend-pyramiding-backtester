@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="panel-token"]').content;
 const labels = {watch:'只读观察', 'demo-watch':'模拟账户观察', demo:'模拟交易', live:'实盘交易'};
 let marketCatalog = [], catalogProfile = null, catalogLoading = false;
-let settingsDirty=false, settingsSaving=false, settingsProfile=null, settingsFields=[];
+let settingsEditor=null, settingsSaving=false, settingsProfile=null;
 const accountAttempts = {};
 let last = null, actionBusy = false, checkBusy = false, loading = false, connected = false, networkLoading = false;
 const date = value => value ? new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN', {hour12:false}) : '—';
@@ -26,7 +26,7 @@ function controls() {
   const mode = $('mode').value;
   const active = last?.running;
   $('mode').disabled = !!active || actionBusy || checkBusy;
-  $('start').disabled = !connected || !!active || actionBusy || checkBusy || !!last?.external_process?.length || settingsDirty || settingsSaving;
+  $('start').disabled = !connected || !!active || actionBusy || checkBusy || !!last?.external_process?.length || !!settingsEditor || settingsSaving;
   $('stop').disabled = !connected || !active || !!last?.stopping || actionBusy;
   $('check').disabled = !connected || checkBusy || !!last?.checking;
   $('check').textContent = checkBusy || last?.checking ? '正在读取…' : '刷新账户 ↗';
@@ -55,14 +55,11 @@ function controls() {
   $('start').textContent = actionBusy ? '处理中…' : mode === 'live' ? '▶ 启动实盘交易' : mode === 'demo' ? '▶ 启动模拟交易' : '▶ 启动观察';
   $('start').classList.toggle('live', mode === 'live');
   const settingsLocked = !!last?.settings_locked || !!last?.external_process?.length || checkBusy || !!last?.checking || settingsSaving;
-  document.querySelectorAll('.settings-save').forEach(button=>{
-    button.disabled = !connected || settingsLocked || !settingsDirty;
-    button.textContent = settingsSaving ? '正在保存…' : (button.closest('.capital-metric') ? '保存' : '保存参数');
-  });
-  document.querySelectorAll('.settings-reset').forEach(button=>{
-    button.disabled = settingsSaving || !settingsDirty;
-  });
-  document.querySelectorAll('#settings-form input,#settings-form select').forEach(input=>input.disabled=settingsLocked);
+  for (const [id, kind] of [['edit-capital','capital'],['edit-strategy','strategy']]) {
+    const button=$(id);
+    button.disabled = !connected || settingsLocked || (!!settingsEditor && settingsEditor !== kind);
+    button.textContent = settingsSaving && settingsEditor === kind ? '保存中…' : settingsEditor === kind ? '保存' : '修改';
+  }
   $('stop').textContent = last?.stopping ? '正在停止…' : '■ 停止';
   $('mode-note').textContent = mode === 'live' ? '启动后会使用实盘账户下单，资金上限按策略配置执行。' : mode === 'demo' ? '使用独立模拟盘密钥，向 OKX 模拟账户发送订单。' : '持续检查账户与市场，不发送交易订单。';
 }
@@ -89,8 +86,16 @@ function render(s) {
   $('key-note').textContent = s.credentials[s.profile] ? '密钥已由服务读取，无需重复输入。' : '请配置此账户的密钥后，重新启动网页服务。';
   $('started').textContent = s.started_at ? date(s.started_at) : '尚未启动';
   $('heartbeat').textContent = beat ? date(beat.updated_at) : '—';
-  $('bar').textContent = s.config.bar; $('leverage').textContent = s.config.leverage + '×';
-  $('allocation').replaceChildren(document.createTextNode(Math.round(s.config.capital_fraction*10000)/100), Object.assign(document.createElement('span'),{textContent:'%'}));
+  if (settingsEditor !== 'strategy') {
+    $('bar').textContent = s.config.bar;
+    $('leverage').textContent = s.config.leverage + '×';
+  }
+  if (settingsEditor !== 'capital') {
+    $('allocation').replaceChildren(
+      document.createTextNode(Math.round(s.config.capital_fraction*10000)/100),
+      Object.assign(document.createElement('span'),{textContent:'%'})
+    );
+  }
   const account = s.account?.data;
   $('equity').textContent = num(account?.account_equity_usdt_equivalent);
   $('available').textContent = num(account?.available_usdt);
@@ -337,91 +342,157 @@ $('generate-candidates').addEventListener('click',()=>generateCandidates());
 $('manual-entry-instrument').addEventListener('change',()=>controls());
 $('manual-entry-fraction').addEventListener('input',()=>controls());
 $('manual-entry-submit').addEventListener('click',()=>submitManualEntry());
-$('mode').addEventListener('change',()=>{message('');settingsDirty=false;marketCatalog=[];catalogProfile=null;controls();refresh();});
+$('mode').addEventListener('change',()=>{message('');cancelSettingsEdit();marketCatalog=[];catalogProfile=null;controls();refresh();});
 controls(); refresh(); refreshNetwork(); setInterval(refresh,2000);
 
-function setSettingsStatus(note, feedback='') {
-  document.querySelectorAll('.settings-note').forEach(node=>node.textContent=note);
-  document.querySelectorAll('.settings-feedback').forEach(node=>node.textContent=feedback);
+function settingsLocked() {
+  return !!last?.settings_locked || !!last?.external_process?.length || checkBusy || !!last?.checking || settingsSaving;
+}
+
+function selectEditableText(node) {
+  const selection=window.getSelection();
+  const range=document.createRange();
+  range.selectNodeContents(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function setEditable(node, enabled) {
+  node.contentEditable = enabled ? 'true' : 'false';
+  node.classList.toggle('inline-editing', enabled);
+  node.setAttribute('aria-label', enabled ? '正在编辑' : '');
+}
+
+function restoreSettingsText() {
+  if (!last) return;
+  $('allocation').replaceChildren(
+    document.createTextNode(Math.round(last.config.capital_fraction*10000)/100),
+    Object.assign(document.createElement('span'),{textContent:'%'})
+  );
+  $('bar').textContent=last.config.bar;
+  $('leverage').textContent=last.config.leverage+'×';
+}
+
+function cancelSettingsEdit() {
+  setEditable($('allocation'), false);
+  setEditable($('bar'), false);
+  setEditable($('leverage'), false);
+  settingsEditor=null;
+  restoreSettingsText();
+  controls();
+}
+
+function beginSettingsEdit(kind) {
+  if (!last || settingsLocked()) return;
+  if (settingsEditor && settingsEditor !== kind) cancelSettingsEdit();
+  settingsEditor=kind;
+  settingsProfile=last.profile;
+  message('');
+  if (kind === 'capital') {
+    $('allocation').textContent=String(Math.round(last.config.capital_fraction*10000)/100);
+    setEditable($('allocation'), true);
+    $('allocation').focus();
+    selectEditableText($('allocation'));
+  } else {
+    $('bar').textContent=last.config.bar;
+    $('leverage').textContent=String(last.config.leverage);
+    setEditable($('bar'), true);
+    setEditable($('leverage'), true);
+    $('bar').focus();
+    selectEditableText($('bar'));
+  }
+  controls();
+}
+
+function parseCapital() {
+  const value=Number($('allocation').textContent.trim().replace('%','').replace(',','.'));
+  if (!Number.isFinite(value) || value <= 0 || value > 100) {
+    throw new Error('资金使用上限必须大于 0% 且不超过 100%');
+  }
+  return value / 100;
+}
+
+function parseStrategyDisplay() {
+  const bar=$('bar').textContent.trim();
+  const leverage=Number($('leverage').textContent.trim().replace(/[×xX倍]/g,''));
+  const barField=last?.parameters?.fields?.find(field=>field.key==='bar');
+  const choices=barField?.choices || [];
+  if (!choices.includes(bar)) {
+    throw new Error('K 线周期无效，可用值：'+choices.join('、'));
+  }
+  if (!Number.isInteger(leverage) || leverage < 1 || leverage > 125) {
+    throw new Error('逐仓杠杆必须是 1–125 的整数');
+  }
+  return {bar, leverage};
+}
+
+async function saveSettingsEdit() {
+  if (!settingsEditor || settingsSaving || settingsLocked()) return;
+  let live;
+  try {
+    live = settingsEditor === 'capital'
+      ? {capital_fraction: parseCapital()}
+      : parseStrategyDisplay();
+  } catch(error) {
+    message(error.message);
+    return;
+  }
+  settingsSaving=true;
+  message('');
+  controls();
+  try {
+    await api('/api/settings',{mode:$('mode').value,values:{live,strategy:{}}});
+    const finished=settingsEditor;
+    setEditable($('allocation'), false);
+    setEditable($('bar'), false);
+    setEditable($('leverage'), false);
+    settingsEditor=null;
+    await refresh();
+    message('');
+    if (finished === 'capital') $('edit-capital').focus(); else $('edit-strategy').focus();
+  } catch(error) {
+    message(error.message);
+  } finally {
+    settingsSaving=false;
+    controls();
+  }
+}
+
+function handleSettingButton(kind) {
+  if (settingsEditor === kind) void saveSettingsEdit();
+  else beginSettingsEdit(kind);
+}
+
+$('edit-capital').addEventListener('click',()=>handleSettingButton('capital'));
+$('edit-strategy').addEventListener('click',()=>handleSettingButton('strategy'));
+
+for (const node of [$('allocation'),$('bar'),$('leverage')]) {
+  node.addEventListener('keydown',event=>{
+    if (!settingsEditor) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelSettingsEdit();
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void saveSettingsEdit();
+    }
+  });
+  node.addEventListener('paste',event=>{
+    if (!settingsEditor) return;
+    event.preventDefault();
+    const text=(event.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText',false,text.replace(/[\r\n]/g,''));
+  });
 }
 
 function syncSettings(s) {
-  if (!s.parameters) return;
-  if(settingsProfile!==s.profile){settingsDirty=false;settingsProfile=s.profile;}
-  if(!settingsFields.length){
-    settingsFields=s.parameters.fields;
-    for(const field of settingsFields){
-      const label=document.createElement('label'); label.textContent=field.label;
-      const input=document.createElement(field.type==='select'?'select':'input');
-      input.id='setting-'+field.key; label.htmlFor=input.id;
-      if(field.type==='select'){
-        for(const value of field.choices){const option=document.createElement('option');option.value=value;option.textContent=value.replace('utc','（UTC）');input.append(option);}
-      }else{
-        input.type=field.type==='weights'?'text':field.type;
-        if(field.type==='number'){input.min=field.min;input.max=field.max;input.step=field.step;input.required=true;}
-        if(field.type==='weights'){input.placeholder='30, 30, 20, 20';input.required=true;}
-      }
-      input.addEventListener('input',()=>{
-        settingsDirty=true;
-        setSettingsStatus('参数尚未保存，保存后下次启动生效。');
-        controls();
-      });
-      input.addEventListener('change',()=>{
-        settingsDirty=true;
-        setSettingsStatus('参数尚未保存，保存后下次启动生效。');
-        controls();
-      });
-      label.append(input);
-      const target = field.key === 'capital_fraction'
-        ? $('capital-settings')
-        : field.section === 'live'
-          ? $('strategy-basic-settings')
-          : $('advanced-settings');
-      target.append(label);
-    }
+  if(settingsProfile!==s.profile){
+    settingsProfile=s.profile;
+    if(settingsEditor) cancelSettingsEdit();
   }
-  if(!settingsDirty&&!settingsSaving){
-    for(const field of settingsFields){
-      const input=$('setting-'+field.key),value=s.parameters.values[field.section][field.key];
-      if(field.type==='checkbox')input.checked=value;
-      else if(field.type==='weights')input.value=value.map(x=>Number((x*100).toFixed(8))).join(', ');
-      else input.value=typeof value==='number'?Number((value*(field.scale||1)).toFixed(8)):value;
-    }
-  }
-  setSettingsStatus(
-    s.settings_locked
-      ? '运行中或仍有持仓、待核对订单时，暂时不能修改参数。'
-      : settingsDirty
-        ? '参数尚未保存，保存后下次启动生效。'
-        : '设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。'
-  );
+  if(settingsEditor && s.settings_locked) cancelSettingsEdit();
+  controls();
 }
 
-document.querySelectorAll('.settings-reset').forEach(button=>button.addEventListener('click',()=>{
-  settingsDirty=false;
-  syncSettings(last);
-  controls();
-  setSettingsStatus(
-    last?.settings_locked
-      ? '运行中或仍有持仓、待核对订单时，暂时不能修改参数。'
-      : '设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。',
-    '已恢复到保存的参数。'
-  );
-}));
-
-$('settings-form').addEventListener('submit',async event=>{
-  event.preventDefault(); if(!$('settings-form').reportValidity())return;
-  const values={live:{},strategy:{}};
-  for(const field of settingsFields){
-    const input=$('setting-'+field.key);
-    values[field.section][field.key]=field.type==='checkbox'?input.checked:field.type==='weights'?input.value.split(/[,，]/).map(x=>Number(x.trim())/100):field.type==='number'?Number(input.value)/(field.scale||1):input.value;
-  }
-  settingsSaving=true;message('');controls();
-  try{
-    await api('/api/settings',{mode:$('mode').value,values});
-    settingsDirty=false;
-    setSettingsStatus('设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。','参数已保存，下次启动生效。');
-  }
-  catch(error){message(error.message);}
-  finally{settingsSaving=false;await refresh();controls();}
-});
