@@ -6,7 +6,7 @@ from .engine import BacktestConfig
 from .live import BAR_SECONDS, LiveConfig, StateStore, config_fingerprint, validate_strategy
 from .okx import dec
 
-LIVE_FIELDS = {"capital_fraction", "leverage", "bar", "top_n"}
+LIVE_FIELDS = {"capital_fraction", "leverage", "bar"}
 STRATEGY_FIELDS = {
     "risk_per_trade",
     "max_position_pct",
@@ -76,7 +76,16 @@ def apply_settings(config, strategy, payload):
 
 def load_settings(config, strategy, store):
     saved = settings_store(store).load()
-    return apply_settings(config, strategy, saved["values"]) if saved else (config, strategy)
+    if not saved:
+        return config, strategy
+    values = {
+        "live": dict(saved["values"].get("live", {})),
+        "strategy": dict(saved["values"].get("strategy", {})),
+    }
+    # Backward compatibility only: top_n used to control the removed preselected
+    # trading universe and is ignored from now on.
+    values["live"].pop("top_n", None)
+    return apply_settings(config, strategy, values)
 
 
 def settings_values(config, strategy):
@@ -150,7 +159,6 @@ def schema():
         number("live", "capital_fraction", "资金使用上限（%）", 0.01, 100, 0.01, 100),
         number("live", "leverage", "逐仓杠杆（倍）", 1, 125, 1),
         dict(section="live", key="bar", label="K 线周期", type="select", choices=list(BAR_SECONDS)),
-        number("live", "top_n", "自动选币数量", 1, 10, 1),
         number("strategy", "risk_per_trade", "每个币种风险预算（%）", 0.01, 10, 0.01, 100),
         number("strategy", "max_position_pct", "单币预算使用上限（%）", 0.01, 100, 0.01, 100),
     ]
