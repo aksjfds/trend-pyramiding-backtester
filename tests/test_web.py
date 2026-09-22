@@ -474,6 +474,7 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     from types import SimpleNamespace
 
     controller.process = SimpleNamespace(
+        pid=12345,
         poll=lambda: None,
         send_signal=lambda *_: None,
         wait=lambda: 0,
@@ -552,6 +553,7 @@ def test_manual_candidate_scan_request_is_queued_only_in_trading_mode(controller
     from types import SimpleNamespace
 
     controller.process = SimpleNamespace(
+        pid=12345,
         poll=lambda: None,
         send_signal=lambda *_: None,
         wait=lambda: 0,
