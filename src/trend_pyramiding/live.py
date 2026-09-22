@@ -635,7 +635,7 @@ class SwapRunner:
             return None
         if not isinstance(request, dict) or not request.get("id"):
             return None
-        if float(request.get("expires_at", 0)) <= self.client.now():
+        if float(request.get("expires_at", 0)) <= time.time():
             self.store.event(
                 "candidate_scan_expired",
                 request_id=str(request["id"]),
@@ -750,7 +750,7 @@ class SwapRunner:
             return None
         if not isinstance(request, dict) or not request.get("id") or not request.get("instrument"):
             return None
-        if float(request.get("expires_at", 0)) <= self.client.now():
+        if float(request.get("expires_at", 0)) <= time.time():
             self.store.event(
                 "manual_entry_rejected",
                 request_id=str(request["id"]),
@@ -958,7 +958,7 @@ class SwapRunner:
 
         if stop_requested():
             return used_margin
-        if float(request.get("expires_at", 0)) <= self.client.now():
+        if float(request.get("expires_at", 0)) <= time.time():
             self.store.event(
                 "entry_approval_rejected",
                 candidate_id=candidate_id,
