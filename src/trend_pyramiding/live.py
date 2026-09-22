@@ -983,7 +983,7 @@ class SwapRunner:
             if stop is None:
                 raise ValueError("strategy_stop_unavailable")
             stop = float(rounded(stop, instrument.tick))
-            bid, ask = self.quote(market)
+            bid, ask, last = self.quote_prices(market)
         except (MarketUnavailable, TransientRead, ValueError) as exc:
             self.store.event(
                 "manual_entry_rejected",
@@ -993,12 +993,16 @@ class SwapRunner:
             )
             return used_margin
 
-        if bid <= stop:
+        if last <= stop:
             self.store.event(
                 "manual_entry_rejected",
                 request_id=request_id,
                 instrument=market,
                 reason="price_crossed_stop",
+                last=last,
+                bid=bid,
+                ask=ask,
+                stop=stop,
             )
             return used_margin
 
@@ -1214,7 +1218,7 @@ class SwapRunner:
             if not bool(row["signal"]) or stop is None:
                 raise ValueError("strategy_condition_no_longer_met")
             stop = float(rounded(stop, instrument.tick))
-            bid, ask = self.quote(market)
+            bid, ask, last = self.quote_prices(market)
             fee_rate = self.fees.get(market)
             if fee_rate is None:
                 fee_rate = self._fee_rate(instrument)
@@ -1230,12 +1234,16 @@ class SwapRunner:
                 self._remove_candidate(market)
             return used_margin
 
-        if bid <= stop:
+        if last <= stop:
             self.store.event(
                 "entry_approval_rejected",
                 instrument=market,
                 candidate_id=candidate_id,
                 reason="price_crossed_stop",
+                last=last,
+                bid=bid,
+                ask=ask,
+                stop=stop,
             )
             self._ack_approval(candidate_id)
             self._remove_candidate(market)
@@ -1604,16 +1612,32 @@ class SwapRunner:
         self.save()
         self.store.event("stop_raised", instrument=market, stop=stop)
 
-    def quote(self, market):
+    def quote_prices(self, market):
         rows = self.client.get("/api/v5/market/ticker", {"instId": market}, private=False)
-        if not rows or not rows[0].get("bidPx") or not rows[0].get("askPx"):
+        if (
+            not rows
+            or not rows[0].get("bidPx")
+            or not rows[0].get("askPx")
+            or not rows[0].get("last")
+        ):
             raise MarketUnavailable("market has no executable quote")
         ticker = rows[0]
         if not 0 <= self.client.now() - float(ticker["ts"]) / 1000 <= 15:
             raise MarketUnavailable("stale market quote")
-        bid, ask = float(dec(ticker["bidPx"])), float(dec(ticker["askPx"]))
-        if bid <= 0 or ask < bid or (ask - bid) / bid * 10000 > self.config.max_spread_bps:
+        bid = float(dec(ticker["bidPx"]))
+        ask = float(dec(ticker["askPx"]))
+        last = float(dec(ticker["last"]))
+        if (
+            bid <= 0
+            or ask < bid
+            or last <= 0
+            or (ask - bid) / bid * 10000 > self.config.max_spread_bps
+        ):
             raise MarketUnavailable("market spread exceeds execution limit")
+        return bid, ask, last
+
+    def quote(self, market):
+        bid, ask, _ = self.quote_prices(market)
         return bid, ask
 
     def market_warning(self, market, error):
@@ -1738,11 +1762,11 @@ class SwapRunner:
                 continue
             stop = float(rounded(position["stop"], instrument.tick))
             try:
-                bid, ask = self.quote(market)
+                bid, ask, last = self.quote_prices(market)
             except (MarketUnavailable, TransientRead) as exc:
                 self.market_warning(market, exc)
                 continue
-            if bid <= stop:
+            if last <= stop:
                 continue
             if (
                 ask <= position["avg"]
