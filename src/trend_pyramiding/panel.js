@@ -86,12 +86,78 @@ function render(s) {
     [row.instrument,num(row.contracts),num(row.average),num(row.stop),row.legs ?? '—',date(row.last_bar)].forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td);});return tr;
   }));
   $('empty-markets').hidden = rows.length > 0;
+  renderEntryCandidates(s);
   const logText = s.logs.map(line=>`[${date(line.time)}] ${line.text}`).join('\n') || '等待启动策略，运行信息会显示在这里。';
   const follow = $('logs').scrollHeight - $('logs').scrollTop - $('logs').clientHeight < 40;
   if ($('logs').textContent !== logText) { $('logs').textContent=logText; if(follow) $('logs').scrollTop=$('logs').scrollHeight; }
   $('log-count').textContent = s.logs.length + ' 条';
   syncSelection(s); syncSettings(s); controls();
 }
+function renderEntryCandidates(s) {
+  const candidates = s.entry_candidates || [];
+  const now = Date.now() / 1000;
+  $('candidate-count').textContent = candidates.length + ' 个候选';
+  $('empty-candidates').hidden = candidates.length > 0;
+  $('candidate-body').replaceChildren(...candidates.map(candidate => {
+    const tr = document.createElement('tr');
+    const remaining = Math.max(0, Math.ceil(Number(candidate.expires_at) - now));
+    const values = [
+      candidate.instrument,
+      date(candidate.bar),
+      num(candidate.signal_close),
+      num(candidate.stop),
+      candidate.indicative_contracts,
+      remaining > 0 ? remaining + ' 秒' : '已失效',
+    ];
+    values.forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.append(td);
+    });
+    const actionCell = document.createElement('td');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'candidate-open';
+    button.textContent = '开仓';
+    button.disabled = !s.entry_approval_enabled || remaining <= 0 || actionBusy;
+    button.addEventListener('click', () => approveEntry(candidate.id, candidate.instrument));
+    actionCell.append(button);
+    tr.append(actionCell);
+    return tr;
+  }));
+  if (s.entry_candidate_error) {
+    $('candidate-feedback').textContent = '候选列表读取失败：' + s.entry_candidate_error;
+  } else if (!s.running) {
+    $('candidate-feedback').textContent = '启动模拟交易或实盘交易后才会扫描开仓候选。';
+  } else if (!s.entry_approval_enabled && candidates.length) {
+    $('candidate-feedback').textContent = '当前状态暂不能批准新开仓，请先处理异常暂停或待核对订单。';
+  } else if (!$('candidate-feedback').dataset.locked) {
+    $('candidate-feedback').textContent = candidates.length ? '候选只在当前信号有效期内可确认。' : '';
+  }
+}
+
+async function approveEntry(candidateId, instrument) {
+  if (actionBusy) return;
+  actionBusy = true;
+  $('candidate-feedback').dataset.locked = '1';
+  $('candidate-feedback').textContent = '正在提交 ' + instrument + ' 开仓确认…';
+  controls();
+  try {
+    await api('/api/approve-entry', {
+      mode: $('mode').value,
+      candidate_id: candidateId,
+    });
+    $('candidate-feedback').textContent = instrument + ' 已提交，策略将在下一轮重新核验后执行。';
+  } catch (error) {
+    $('candidate-feedback').textContent = '开仓确认失败：' + error.message;
+  } finally {
+    actionBusy = false;
+    await refresh();
+    delete $('candidate-feedback').dataset.locked;
+    controls();
+  }
+}
+
 function renderNetwork(status) {
   const node = $('okx-network');
   if (status.connected) {
