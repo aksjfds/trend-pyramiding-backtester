@@ -610,7 +610,17 @@ class SwapRunner:
                 continue
 
             stop = float(candidate["stop"])
-            bid, ask = self.quote(market)
+            try:
+                bid, ask = self.quote(market)
+            except MarketUnavailable as exc:
+                self.store.event(
+                    "entry_approval_rejected",
+                    instrument=market,
+                    candidate_id=candidate_id,
+                    reason=str(exc),
+                )
+                self._ack_approval(candidate_id)
+                continue
             if bid <= stop:
                 self.store.event(
                     "entry_approval_rejected",
