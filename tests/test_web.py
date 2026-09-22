@@ -464,9 +464,28 @@ def test_worker_stays_in_foreground_terminal_session(controller, monkeypatch):
     assert seen["stderr"] is web.subprocess.STDOUT
 
 
-def mark_worker_ready(controller, pid=12345):
+def mark_worker_ready(controller, pid=12345, age_seconds=0):
     controller.heartbeat.write_text(
-        json.dumps({"pid": pid, "updated_at": time.time(), "phase": "ready"})
+        json.dumps(
+            {
+                "pid": pid,
+                "updated_at": time.time() - age_seconds,
+                "phase": "ready",
+            }
+        )
+    )
+
+
+def save_flat_web_state(controller, *instruments):
+    controller.store(False).save(
+        {
+            "version": 1,
+            "pending": None,
+            "markets": {
+                instrument: {"last_bar": None, "position": None}
+                for instrument in instruments
+            },
+        }
     )
 
 
@@ -481,6 +500,7 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     )
     controller.mode = "live"
     mark_worker_ready(controller)
+    save_flat_web_state(controller, "HYPE-USDT-SWAP")
     candidate = {
         "id": "candidate-1",
         "instrument": "HYPE-USDT-SWAP",
@@ -500,8 +520,13 @@ def test_manual_entry_approval_queues_only_current_live_candidate(controller):
     assert snapshot["candidate_scan_pending"] is False
 
     controller.approve_entry("live", "candidate-1")
-    assert controller.approval_store(False).load()["approvals"] == ["candidate-1"]
+    approvals = controller.approval_store(False).load()["approvals"]
+    assert len(approvals) == 1
+    assert approvals[0]["id"] == "candidate-1"
+    assert approvals[0]["expires_at"] > approvals[0]["requested_at"]
+    assert controller.snapshot("live")["entry_approval_enabled"] is False
 
+    controller.approval_store(False).save({"version": 1, "approvals": []})
     with pytest.raises(ValueError, match="失效"):
         controller.approve_entry("live", "missing")
 
@@ -560,11 +585,13 @@ def test_manual_candidate_scan_request_is_queued_only_in_trading_mode(controller
     )
     controller.mode = "live"
     mark_worker_ready(controller)
+    save_flat_web_state(controller, "HYPE-USDT-SWAP")
 
     controller.request_candidate_scan("live")
     queued = controller.candidate_scan_store(False).load()
     assert queued["request"]["id"]
     assert queued["request"]["requested_at"] > 0
+    assert queued["request"]["expires_at"] > queued["request"]["requested_at"]
     assert controller.snapshot("live")["candidate_scan_pending"] is True
 
     with pytest.raises(ValueError, match="已提交"):
@@ -625,6 +652,7 @@ def test_specified_instrument_manual_entry_is_queued_for_managed_flat_coin(contr
     queued = controller.manual_entry_store(False).load()["request"]
     assert queued["instrument"] == "HYPE-USDT-SWAP"
     assert queued["id"]
+    assert queued["expires_at"] > queued["requested_at"]
     assert controller.snapshot("live")["manual_entry_pending"] is True
 
     with pytest.raises(ValueError, match="管理列表"):
@@ -672,3 +700,58 @@ def test_manual_entry_http_endpoint(server, monkeypatch):
     )
     assert status == 200 and json.loads(body)["ok"] is True
     assert calls == [("live", "HYPE-USDT-SWAP")]
+
+
+def test_stale_heartbeat_disables_and_rejects_manual_trading_controls(controller):
+    from types import SimpleNamespace
+
+    controller.process = SimpleNamespace(
+        pid=12345,
+        poll=lambda: None,
+        send_signal=lambda *_: None,
+        wait=lambda: 0,
+    )
+    controller.mode = "live"
+    save_flat_web_state(controller, "HYPE-USDT-SWAP")
+    mark_worker_ready(controller, age_seconds=120)
+
+    snapshot = controller.snapshot("live")
+    assert snapshot["candidate_scan_enabled"] is False
+    assert snapshot["entry_approval_enabled"] is False
+    assert snapshot["manual_entry_enabled"] is False
+    with pytest.raises(ValueError, match="心跳"):
+        controller.request_manual_entry("live", "HYPE-USDT-SWAP")
+
+
+def test_manual_actions_are_mutually_exclusive(controller):
+    from types import SimpleNamespace
+
+    controller.process = SimpleNamespace(
+        pid=12345,
+        poll=lambda: None,
+        send_signal=lambda *_: None,
+        wait=lambda: 0,
+    )
+    controller.mode = "live"
+    mark_worker_ready(controller)
+    save_flat_web_state(controller, "HYPE-USDT-SWAP")
+    candidate = {
+        "id": "candidate-1",
+        "instrument": "HYPE-USDT-SWAP",
+        "bar": "2026-09-22T08:00:00+00:00",
+        "signal_close": 50.0,
+        "stop": 48.0,
+        "indicative_contracts": "1",
+        "detected_at": time.time(),
+        "expires_at": time.time() + 120,
+    }
+    controller.candidate_store(False).save({"version": 1, "candidates": [candidate]})
+
+    controller.request_candidate_scan("live")
+    with pytest.raises(ValueError, match="扫描"):
+        controller.approve_entry("live", "candidate-1")
+
+    controller.candidate_scan_store(False).save({"version": 1, "request": None})
+    controller.approve_entry("live", "candidate-1")
+    with pytest.raises(ValueError, match="候选开仓"):
+        controller.request_manual_entry("live", "HYPE-USDT-SWAP")
