@@ -387,6 +387,7 @@ class SwapRunner:
         self.candidate_store = StateStore(self.store.path.with_suffix(".candidates.json"))
         self.approval_store = StateStore(self.store.path.with_suffix(".entry-approvals.json"))
         self.scan_store = StateStore(self.store.path.with_suffix(".candidate-scan.json"))
+        self.manual_entry_store = StateStore(self.store.path.with_suffix(".manual-entry.json"))
 
     def save(self):
         self.store.save(self.state)
@@ -505,6 +506,7 @@ class SwapRunner:
         # Click commands are ephemeral: never replay them after a worker restart.
         self.approval_store.save({"version": 1, "approvals": []})
         self.scan_store.save({"version": 1, "request": None})
+        self.manual_entry_store.save({"version": 1, "request": None})
         self.store.event(
             "ready",
             demo=self.config.demo,
@@ -681,6 +683,162 @@ class SwapRunner:
             checked_markets=checked,
             candidates=found,
         )
+
+    def _take_manual_entry_request(self):
+        try:
+            with self.manual_entry_store.lock():
+                data = self.manual_entry_store.load() or {"version": 1, "request": None}
+                request = data.get("request")
+                self.manual_entry_store.save({"version": 1, "request": None})
+        except RuntimeError:
+            return None
+        if not isinstance(request, dict) or not request.get("id") or not request.get("instrument"):
+            return None
+        return request
+
+    def _process_manual_entry_request(
+        self, account, budget, used_margin, stop_requested
+    ):
+        request = self._take_manual_entry_request()
+        if request is None:
+            return used_margin
+
+        request_id = str(request["id"])
+        market = str(request["instrument"])
+        item = self.state["markets"].get(market)
+        instrument = self.instruments.get(market)
+        if item is None or instrument is None:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=request_id,
+                instrument=market,
+                reason="instrument_not_managed",
+            )
+            return used_margin
+        if item["position"] is not None:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=request_id,
+                instrument=market,
+                reason="position_already_exists",
+            )
+            return used_margin
+        if stop_requested():
+            return used_margin
+
+        try:
+            frame = closed_candles(self.client, market, self.strategy, self.config.bar)
+            row = frame.iloc[-1]
+            stop = _initial_stop(row, self.strategy)
+            if stop is None:
+                raise ValueError("strategy_stop_unavailable")
+            stop = float(rounded(stop, instrument.tick))
+            bid, ask = self.quote(market)
+        except (MarketUnavailable, TransientRead, ValueError) as exc:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=request_id,
+                instrument=market,
+                reason=str(exc),
+            )
+            return used_margin
+
+        if bid <= stop:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=request_id,
+                instrument=market,
+                reason="price_crossed_stop",
+            )
+            return used_margin
+
+        limit = rounded(
+            ask * (1 + self.config.max_entry_slippage_bps / 10000),
+            instrument.tick,
+        )
+        if float(limit) < ask:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=request_id,
+                instrument=market,
+                reason="invalid_limit_price",
+            )
+            return used_margin
+
+        market_budget = budget / len(self.instruments)
+        quantity = size_contracts(
+            instrument,
+            price=float(limit),
+            stop=stop,
+            market_budget=market_budget,
+            total_budget=budget,
+            available=account["available_usdt"],
+            used_margin=used_margin,
+            position=None,
+            strategy=self.strategy,
+            fee_rate=self.fees[market],
+            leverage=self.config.leverage,
+        )
+        if quantity == 0:
+            self.store.event(
+                "manual_entry_rejected",
+                request_id=request_id,
+                instrument=market,
+                reason="below_minimum_or_budget",
+            )
+            return used_margin
+
+        self.reconcile(market)
+        if item["position"] is not None or stop_requested():
+            return used_margin
+
+        stop_id = "ts" + uuid.uuid4().hex[:28]
+        risk_budget = market_budget * self.strategy.risk_per_trade
+        self.store.event(
+            "manual_entry_received",
+            request_id=request_id,
+            instrument=market,
+            contracts=number(quantity),
+            bar=row["timestamp"].isoformat(),
+            stop=stop,
+        )
+        self._order(
+            market,
+            {
+                "tdMode": "isolated",
+                "posSide": "net",
+                "side": "buy",
+                "ordType": "fok",
+                "sz": number(quantity),
+                "px": number(limit),
+                "attachAlgoOrds": [
+                    {
+                        "attachAlgoClOrdId": stop_id,
+                        "slTriggerPx": number(stop),
+                        "slOrdPx": "-1",
+                        "slTriggerPxType": "last",
+                    }
+                ],
+            },
+            {
+                "kind": "entry",
+                "stop": stop,
+                "stop_id": stop_id,
+                "market_budget": market_budget,
+                "risk_budget": risk_budget,
+            },
+        )
+        if item["position"] is not None:
+            item["last_bar"] = row["timestamp"].isoformat()
+            self.save()
+            self._remove_candidate(market)
+
+        cost = float(quantity * instrument.contract_value * limit) * (
+            1 / self.config.leverage + 2 * self.fees[market]
+        )
+        used_margin += cost
+        account["available_usdt"] = max(account["available_usdt"] - cost, 0)
+        return used_margin
 
     def _approval_ids(self):
         try:
@@ -1141,6 +1299,9 @@ class SwapRunner:
                 used_margin += notional * (1 / self.config.leverage + 2 * self.fees[market])
 
         used_margin = self._process_entry_approvals(
+            account, budget, used_margin, stop_requested
+        )
+        used_margin = self._process_manual_entry_request(
             account, budget, used_margin, stop_requested
         )
         self._process_candidate_scan(account, budget, used_margin, stop_requested)
