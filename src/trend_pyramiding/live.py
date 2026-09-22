@@ -730,7 +730,12 @@ class SwapRunner:
         skipped = 0
         found = 0
         try:
-            scan_instruments = supported_instruments(self.client)
+            scan_map = {
+                instrument.inst_id: instrument
+                for instrument in supported_instruments(self.client)
+            }
+            scan_map.update(self.instruments)
+            scan_instruments = [scan_map[key] for key in sorted(scan_map)]
             self.store.event(
                 "candidate_scan_started",
                 request_id=request_id,
