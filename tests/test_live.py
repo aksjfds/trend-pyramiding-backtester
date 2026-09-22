@@ -582,7 +582,7 @@ def test_candidate_scan_checks_all_supported_markets_and_sorts_by_volume(runner,
             return rows + [{**rows[0], "instId": other, "ctValCcy": "ETH"}]
         if path.endswith("market/tickers"):
             return [
-                {"instId": MARKET, "volCcy24h": "10000", "last": "100"},
+                {"instId": MARKET, "volCcy24h": "10000", "last": "1000"},
                 {"instId": other, "volCcy24h": "50000", "last": "50"},
             ]
         return rows
@@ -597,8 +597,9 @@ def test_candidate_scan_checks_all_supported_markets_and_sorts_by_volume(runner,
     runner.step()
 
     candidates = runner.candidate_store.load()["candidates"]
-    assert [item["instrument"] for item in candidates] == [other, MARKET]
-    assert [item["volume_usdt_24h"] for item in candidates] == ["2500000", "1000000"]
+    # ETH has higher base-currency volume, but BTC has higher USDT notional.
+    assert [item["instrument"] for item in candidates] == [MARKET, other]
+    assert [item["volume_usdt_24h"] for item in candidates] == ["10000000", "2500000"]
     assert all(set(item) == {"id", "instrument", "volume_usdt_24h"} for item in candidates)
     assert other not in runner.state["markets"]
     scan_state = runner.scan_store.load()
