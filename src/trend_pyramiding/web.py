@@ -875,13 +875,13 @@ def main():
                     threading.Thread(target=server.shutdown, daemon=True).start()
 
                 previous = {s: signal.signal(s, shutdown) for s in (signal.SIGINT, signal.SIGTERM)}
-                print(f"网页已启动：{server.origin}（尚未启动策略）", flush=True)
+                safe_console_print(f"网页已启动：{server.origin}（尚未启动策略）", flush=True)
                 if args.open:
                     webbrowser.open(server.origin)
                 try:
                     server.serve_forever()
                 finally:
-                    print("正在停止策略，等待当前操作结束…", flush=True)
+                    safe_console_print("正在停止策略，等待当前操作结束…", flush=True)
                     controller.close()
                     for s, handler in previous.items():
                         signal.signal(s, handler)
