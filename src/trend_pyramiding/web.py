@@ -236,6 +236,9 @@ class Controller:
             state = store.load()
             if state and state.get("pending"):
                 raise ValueError("存在待核对订单，不能提交新的开仓")
+            manual_data = self.manual_entry_store(demo).load()
+            if manual_data and manual_data.get("request"):
+                raise ValueError("已有手动开仓正在处理，请等待完成")
             candidate = next(
                 (item for item in self.entry_candidates(demo) if item["id"] == candidate_id),
                 None,
@@ -654,6 +657,7 @@ class Controller:
                     and not self.stopping
                     and not halt
                     and not bool((state or {}).get("pending"))
+                    and not manual_entry_pending
                 ),
                 "entry_approval_enabled": bool(
                     running
@@ -675,6 +679,7 @@ class Controller:
                     and not halt
                     and not bool((state or {}).get("pending"))
                     and not manual_entry_pending
+                    and not scan_pending
                 ),
                 "manual_entry_instruments": [
                     row["instrument"]
