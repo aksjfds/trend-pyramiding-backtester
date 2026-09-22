@@ -194,6 +194,15 @@ def runner(tmp_path, monkeypatch):
     return bot
 
 
+def request_candidate_scan(bot):
+    bot.scan_store.save(
+        {
+            "version": 1,
+            "request": {"id": "scan-test", "requested_at": bot.client.now()},
+        }
+    )
+
+
 def approve_first_candidate(bot):
     data = bot.candidate_store.load()
     assert data and data["candidates"]
@@ -365,9 +374,13 @@ def test_candles_use_confirmed_only_and_reject_gaps():
         closed_candles(exchange, MARKET, BacktestConfig())
 
 
-def test_step_creates_candidate_then_manual_approval_opens_with_stop(runner):
+def test_step_creates_candidate_only_after_manual_scan_then_approval_opens(runner):
     runner.step()
     assert not runner.client.orders
+    assert runner.candidate_store.load()["candidates"] == []
+
+    request_candidate_scan(runner)
+    runner.step()
     candidates = runner.candidate_store.load()["candidates"]
     assert len(candidates) == 1
     assert candidates[0]["instrument"] == MARKET
@@ -384,11 +397,17 @@ def test_step_creates_candidate_then_manual_approval_opens_with_stop(runner):
     assert len(runner.client.orders) == 1
 
 
-def test_midbar_start_skips_stale_signal(runner):
+def test_midbar_does_not_scan_until_manually_requested(runner):
     runner.client.clock += 600
     runner.step()
     assert not runner.client.orders
-    assert runner.state["markets"][MARKET]["last_bar"] is not None
+    assert runner.candidate_store.load()["candidates"] == []
+    assert runner.state["markets"][MARKET]["last_bar"] is None
+
+    request_candidate_scan(runner)
+    runner.step()
+    assert runner.candidate_store.load()["candidates"]
+    assert not runner.client.orders
 
 
 def test_hedge_mode_is_rejected_without_changing_account_mode():
@@ -680,6 +699,7 @@ def test_wide_spread_recovers_same_bar_without_duplicate_order(runner, monkeypat
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(runner.client, "get", get)
+    request_candidate_scan(runner)
     runner.step()
     runner.step()
     assert not runner.client.orders
@@ -687,6 +707,7 @@ def test_wide_spread_recovers_same_bar_without_duplicate_order(runner, monkeypat
     events = runner.store.path.with_suffix(".events.jsonl").read_text()
     assert events.count("market_deferred") == 1
     bad = False
+    request_candidate_scan(runner)
     runner.step()
     assert runner.candidate_store.load()["candidates"]
     approve_first_candidate(runner)
@@ -712,6 +733,7 @@ def test_one_market_data_failure_does_not_block_other_market(runner, monkeypatch
         return original(path, params, **kwargs)
 
     monkeypatch.setattr(runner.client, "get", get)
+    request_candidate_scan(runner)
     runner.step()
     assert not runner.client.orders
     assert runner.candidate_store.load()["candidates"][0]["instrument"] == MARKET
@@ -746,12 +768,12 @@ def test_unknown_held_market_valuation_blocks_entries_but_maintains_stops(runner
     assert MARKET in runner.market_warnings
 
 
-def test_stale_same_candle_is_reported_without_new_order(runner):
+def test_candidate_expires_without_automatic_rescan(runner):
+    request_candidate_scan(runner)
     runner.step()
     assert runner.candidate_store.load()["candidates"]
     runner.client.clock += 7200
     runner.step()
-    assert MARKET in runner.market_warnings
     assert not runner.client.orders
     assert runner.candidate_store.load()["candidates"] == []
 
@@ -770,6 +792,7 @@ def test_event_rotation_does_not_modify_order_state(tmp_path):
 
 
 def test_expired_manual_approval_never_opens(runner):
+    request_candidate_scan(runner)
     runner.step()
     candidate_id = approve_first_candidate(runner)
     runner.client.clock += runner.config.max_signal_age_seconds + 1
@@ -781,6 +804,7 @@ def test_expired_manual_approval_never_opens(runner):
 
 
 def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(runner):
+    request_candidate_scan(runner)
     runner.step()
     approve_first_candidate(runner)
     runner.step()
@@ -822,3 +846,13 @@ def test_existing_position_still_uses_automatic_pyramiding_after_manual_entry(ru
     runner.step()
     assert len(runner.client.orders) == before + 1
     assert len(runner.state["markets"][MARKET]["position"]["legs"]) == 2
+
+
+def test_new_candle_alone_never_generates_first_entry_candidate(runner):
+    runner.step()
+    assert runner.candidate_store.load()["candidates"] == []
+
+    runner.client.clock += 3600
+    runner.step()
+    assert runner.candidate_store.load()["candidates"] == []
+    assert not runner.client.orders
