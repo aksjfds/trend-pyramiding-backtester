@@ -274,7 +274,8 @@ class Instrument:
         return cls(row["instId"], *values, row.get("groupId", ""), row["instCategory"])
 
 
-def universe(client: OKXClient, count: int, requested: tuple[str, ...] = ()) -> list[Instrument]:
+def supported_instruments(client: OKXClient) -> list[Instrument]:
+    """Return every currently supported live linear USDT swap."""
     instruments = {}
     for row in client.get("/api/v5/public/instruments", {"instType": "SWAP"}, private=False):
         try:
@@ -282,6 +283,11 @@ def universe(client: OKXClient, count: int, requested: tuple[str, ...] = ()) -> 
             instruments[item.inst_id] = item
         except (ValueError, KeyError):
             continue
+    return [instruments[key] for key in sorted(instruments)]
+
+
+def universe(client: OKXClient, count: int, requested: tuple[str, ...] = ()) -> list[Instrument]:
+    instruments = {item.inst_id: item for item in supported_instruments(client)}
     if requested:
         if not all(k in instruments for k in requested):
             raise ValueError("a configured instrument is unavailable or unsupported")
