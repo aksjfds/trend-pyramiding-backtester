@@ -31,9 +31,9 @@
 <div class="table-scroll"><table><thead><tr><th>符合策略的币种</th><th>24h USDT 成交量</th><th>操作</th></tr></thead><tbody id="candidate-body"></tbody></table></div>
 <div class="empty" id="empty-candidates"><div class="empty-icon">◎</div><strong>当前没有符合策略的币种</strong><p>需要时点击“生成候选”；程序只列出当前符合开仓策略条件的币种。</p></div>
 <p id="candidate-feedback" class="hint" role="status"></p></section>
-<section class="card positions" id="positions"><div class="section-heading"><div><h2>持仓与止损</h2><p class="hint">策略保存的记录；停止后可能与交易所持仓不同。</p></div><span class="tag" id="market-count">当前无管理币对</span></div>
-<div class="table-scroll"><table><thead><tr><th>永续合约</th><th>持仓张数</th><th>平均入场价</th><th>当前止损价</th><th>加仓档数</th><th>最近处理 K 线</th></tr></thead><tbody id="market-body"></tbody></table></div>
-<div class="empty" id="empty-markets"><div class="empty-icon">▥</div><strong>策略尚无持仓记录</strong><p>还没有策略持仓。可在上方按需指定币种开仓。</p></div></section>
+<section class="card positions" id="positions"><div class="section-heading"><div><h2>仓位</h2><p class="hint">持仓数据来自 OKX；策略止损价来自当前策略状态。</p></div><span class="tag" id="market-count">当前无仓位</span></div>
+<div class="position-list" id="position-list"></div>
+<div class="empty" id="empty-markets"><div class="empty-icon">▥</div><strong>当前没有持仓</strong><p>实际成交后的仓位会显示在这里。</p></div></section>
 <section class="card activity" id="activity"><div class="section-heading"><div><h2>本次运行日志</h2><p class="hint">自动刷新，保留最近 300 条；历史交易事件保存在服务状态目录。</p></div><span class="tag" id="log-count">0 条</span></div><pre id="logs" aria-label="运行日志">等待启动策略，运行信息会显示在这里。</pre></section>
 <footer><span>顺势加仓 / 结构止损 / 移动止盈</span><span>关闭浏览器不停止策略；退出网页服务会请求停止策略。</span></footer>
 </main>
