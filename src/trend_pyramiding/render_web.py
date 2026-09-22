@@ -133,6 +133,7 @@ class Application:
                 "/api/check",
                 "/api/selection",
                 "/api/settings",
+                "/api/approve-entry",
             ):
                 if env.get("CONTENT_TYPE") != "application/json":
                     return respond(415, {"error": "需要 JSON 请求"})
@@ -151,6 +152,10 @@ class Application:
                 elif path == "/api/selection":
                     self.controller.save_selection(
                         data.get("mode", "watch"), data.get("instruments")
+                    )
+                elif path == "/api/approve-entry":
+                    self.controller.approve_entry(
+                        data.get("mode", "watch"), data.get("candidate_id")
                     )
                 elif path == "/api/stop":
                     self.controller.stop()
