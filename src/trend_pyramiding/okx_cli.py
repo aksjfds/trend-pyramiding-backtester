@@ -31,10 +31,54 @@ def check_account(client, config, store):
     except (ValueError, RuntimeError, OSError) as exc:
         warnings.append(f"策略管理币种读取失败：{exc}")
         state = None
+    position_details = []
     try:
-        positions = sum(
-            dec(p.get("pos") or "0") != 0 for p in client.get("/api/v5/account/positions")
-        )
+        position_rows = client.get("/api/v5/account/positions")
+        positions = sum(dec(p.get("pos") or "0") != 0 for p in position_rows)
+        specs = {item.inst_id: item for item in supported_instruments(client)}
+        strategy_stops = {
+            market: market_state.get("position", {}).get("stop")
+            for market, market_state in (state or {}).get("markets", {}).items()
+            if market_state.get("position")
+        }
+        for row in position_rows:
+            quantity = dec(row.get("pos") or "0")
+            if quantity == 0:
+                continue
+            market = str(row.get("instId") or "")
+            spec = specs.get(market)
+            mark_raw = row.get("markPx")
+            mark = float(dec(mark_raw)) if mark_raw not in (None, "") else None
+            notional_usdt = (
+                float(abs(quantity) * spec.contract_value * dec(mark_raw))
+                if spec is not None and mark_raw not in (None, "")
+                else None
+            )
+            margin_raw = row.get("margin")
+            margin = (
+                float(dec(margin_raw))
+                if margin_raw not in (None, "")
+                else None
+            )
+            ratio_raw = row.get("mgnRatio")
+            maintenance_margin_ratio = (
+                float(dec(ratio_raw)) * 100
+                if ratio_raw not in (None, "")
+                else None
+            )
+            avg_raw = row.get("avgPx")
+            average = float(dec(avg_raw)) if avg_raw not in (None, "") else None
+            position_details.append(
+                {
+                    "instrument": market,
+                    "notional_usdt": notional_usdt,
+                    "margin_usdt": margin,
+                    "maintenance_margin_ratio_pct": maintenance_margin_ratio,
+                    "average": average,
+                    "mark": mark,
+                    "strategy_stop": strategy_stops.get(market),
+                }
+            )
     except (ValueError, RuntimeError, OSError) as exc:
         warnings.append(f"持仓读取失败：{exc}")
     try:
@@ -53,6 +97,7 @@ def check_account(client, config, store):
         if account["equity"] is not None
         else None,
         "open_positions": positions,
+        "positions": position_details,
         "pending_orders": pending,
         "saved_state": state is not None,
         "unresolved_order": bool(state and state["pending"]),
