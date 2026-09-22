@@ -55,9 +55,13 @@ function controls() {
   $('start').textContent = actionBusy ? '处理中…' : mode === 'live' ? '▶ 启动实盘交易' : mode === 'demo' ? '▶ 启动模拟交易' : '▶ 启动观察';
   $('start').classList.toggle('live', mode === 'live');
   const settingsLocked = !!last?.settings_locked || !!last?.external_process?.length || checkBusy || !!last?.checking || settingsSaving;
-  $('save-settings').disabled = !connected || settingsLocked || !settingsDirty;
-  $('save-settings').textContent = settingsSaving ? '正在保存…' : '保存参数';
-  $('reset-settings').disabled = settingsSaving || !settingsDirty;
+  document.querySelectorAll('.settings-save').forEach(button=>{
+    button.disabled = !connected || settingsLocked || !settingsDirty;
+    button.textContent = settingsSaving ? '正在保存…' : (button.closest('.capital-metric') ? '保存' : '保存参数');
+  });
+  document.querySelectorAll('.settings-reset').forEach(button=>{
+    button.disabled = settingsSaving || !settingsDirty;
+  });
   document.querySelectorAll('#settings-form input,#settings-form select').forEach(input=>input.disabled=settingsLocked);
   $('stop').textContent = last?.stopping ? '正在停止…' : '■ 停止';
   $('mode-note').textContent = mode === 'live' ? '启动后会使用实盘账户下单，资金上限按策略配置执行。' : mode === 'demo' ? '使用独立模拟盘密钥，向 OKX 模拟账户发送订单。' : '持续检查账户与市场，不发送交易订单。';
@@ -349,6 +353,11 @@ $('manual-entry-submit').addEventListener('click',()=>submitManualEntry());
 $('mode').addEventListener('change',()=>{message('');settingsDirty=false;marketCatalog=[];catalogProfile=null;controls();refresh();});
 controls(); refresh(); refreshNetwork(); setInterval(refresh,2000);
 
+function setSettingsStatus(note, feedback='') {
+  document.querySelectorAll('.settings-note').forEach(node=>node.textContent=note);
+  document.querySelectorAll('.settings-feedback').forEach(node=>node.textContent=feedback);
+}
+
 function syncSettings(s) {
   if (!s.parameters) return;
   if(settingsProfile!==s.profile){settingsDirty=false;settingsProfile=s.profile;}
@@ -365,8 +374,23 @@ function syncSettings(s) {
         if(field.type==='number'){input.min=field.min;input.max=field.max;input.step=field.step;input.required=true;}
         if(field.type==='weights'){input.placeholder='30, 30, 20, 20';input.required=true;}
       }
-      input.addEventListener('input',()=>{settingsDirty=true;$('settings-feedback').textContent='';controls();$('settings-note').textContent='参数尚未保存，保存后才能启动。';});
-      label.append(input); $(field.section==='live'?'basic-settings':'advanced-settings').append(label);
+      input.addEventListener('input',()=>{
+        settingsDirty=true;
+        setSettingsStatus('参数尚未保存，保存后下次启动生效。');
+        controls();
+      });
+      input.addEventListener('change',()=>{
+        settingsDirty=true;
+        setSettingsStatus('参数尚未保存，保存后下次启动生效。');
+        controls();
+      });
+      label.append(input);
+      const target = field.key === 'capital_fraction'
+        ? $('capital-settings')
+        : field.section === 'live'
+          ? $('strategy-basic-settings')
+          : $('advanced-settings');
+      target.append(label);
     }
   }
   if(!settingsDirty&&!settingsSaving){
@@ -377,10 +401,27 @@ function syncSettings(s) {
       else input.value=typeof value==='number'?Number((value*(field.scale||1)).toFixed(8)):value;
     }
   }
-  $('settings-saved').textContent='已保存 · '+Math.round(s.config.capital_fraction*10000)/100+'% / '+s.config.leverage+'× / '+s.config.bar;
-  $('settings-note').textContent=s.settings_locked?'运行中或仍有持仓、待核对订单时，暂时不能修改参数。':settingsDirty?'参数尚未保存，保存后才能启动。':'设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。';
+  setSettingsStatus(
+    s.settings_locked
+      ? '运行中或仍有持仓、待核对订单时，暂时不能修改参数。'
+      : settingsDirty
+        ? '参数尚未保存，保存后下次启动生效。'
+        : '设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。'
+  );
 }
-$('reset-settings').addEventListener('click',()=>{settingsDirty=false;syncSettings(last);controls();$('settings-feedback').textContent='已恢复到保存的参数。';});
+
+document.querySelectorAll('.settings-reset').forEach(button=>button.addEventListener('click',()=>{
+  settingsDirty=false;
+  syncSettings(last);
+  controls();
+  setSettingsStatus(
+    last?.settings_locked
+      ? '运行中或仍有持仓、待核对订单时，暂时不能修改参数。'
+      : '设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。',
+    '已恢复到保存的参数。'
+  );
+}));
+
 $('settings-form').addEventListener('submit',async event=>{
   event.preventDefault(); if(!$('settings-form').reportValidity())return;
   const values={live:{},strategy:{}};
@@ -389,7 +430,11 @@ $('settings-form').addEventListener('submit',async event=>{
     values[field.section][field.key]=field.type==='checkbox'?input.checked:field.type==='weights'?input.value.split(/[,，]/).map(x=>Number(x.trim())/100):field.type==='number'?Number(input.value)/(field.scale||1):input.value;
   }
   settingsSaving=true;message('');controls();
-  try{await api('/api/settings',{mode:$('mode').value,values});settingsDirty=false;$('settings-feedback').textContent='参数已保存，下次启动生效。';}
+  try{
+    await api('/api/settings',{mode:$('mode').value,values});
+    settingsDirty=false;
+    setSettingsStatus('设置分别保存到当前实盘或模拟账户；杠杆上限还需通过交易所核验。','参数已保存，下次启动生效。');
+  }
   catch(error){message(error.message);}
   finally{settingsSaving=false;await refresh();controls();}
 });
