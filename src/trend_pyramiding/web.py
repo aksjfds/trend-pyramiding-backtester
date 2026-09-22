@@ -204,27 +204,19 @@ class Controller:
         candidates = data.get("candidates")
         if not isinstance(candidates, list):
             raise ValueError("待确认开仓列表格式错误")
-        now = time.time()
         result = []
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
-            if float(candidate.get("expires_at", 0)) <= now:
+            if not {"id", "instrument"} <= set(candidate):
                 continue
-            required = {
-                "id",
-                "instrument",
-                "bar",
-                "signal_close",
-                "stop",
-                "indicative_contracts",
-                "detected_at",
-                "expires_at",
-            }
-            if not required <= set(candidate):
-                continue
-            result.append(candidate)
-        return sorted(result, key=lambda item: (item["bar"], item["instrument"]))
+            result.append(
+                {
+                    "id": str(candidate["id"]),
+                    "instrument": str(candidate["instrument"]),
+                }
+            )
+        return sorted(result, key=lambda item: item["instrument"])
 
     def approve_entry(self, mode, candidate_id):
         if not isinstance(candidate_id, str) or not candidate_id:
@@ -242,7 +234,7 @@ class Controller:
                 None,
             )
             if candidate is None:
-                raise ValueError("该开仓信号已失效，请重新生成候选")
+                raise ValueError("该候选已不存在，请重新生成候选")
 
             queue = self.approval_store(demo)
             try:
@@ -258,10 +250,7 @@ class Controller:
                         {
                             "id": candidate_id,
                             "requested_at": now,
-                            "expires_at": min(
-                                float(candidate["expires_at"]),
-                                now + CONTROL_COMMAND_TTL_SECONDS,
-                            ),
+                            "expires_at": now + CONTROL_COMMAND_TTL_SECONDS,
                         }
                     ]
                     queue.save({"version": 1, "approvals": approvals})
