@@ -197,7 +197,6 @@ def main():
         environment = "demo" if config.demo else "live"
         store = StateStore((args.state_dir or root / "state") / f"okx-{environment}.json")
         config, strategy = load_settings(config, strategy, store)
-        config = selected_config(config, store)
         if args.command == "status":
             state = store.load()
             if state is None:
