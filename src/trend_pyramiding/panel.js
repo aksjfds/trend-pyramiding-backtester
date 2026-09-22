@@ -140,13 +140,13 @@ function renderManualEntry(s) {
   if (instruments.includes(previous)) select.value = previous;
 
   if (s.manual_entry_pending) {
-    $('manual-entry-note').textContent = '手动开仓请求已提交，worker 正在核验最新 K 线、初始止损、账户余额和交易所最小张数。';
+    $('manual-entry-note').textContent = '手动开仓请求已提交，worker 正在核验最新 K 线、初始止损、当前最优卖价、账户余额和交易所最小张数。';
   } else if (!s.running) {
     $('manual-entry-note').textContent = '启动模拟交易或实盘交易后，选择币种和资金使用比例即可手动开仓。';
   } else if (!s.manual_entry_enabled) {
     $('manual-entry-note').textContent = '当前状态不能手动开仓，请先处理异常暂停、待核对订单或等待策略准备完成。';
   } else {
-    $('manual-entry-note').textContent = '不要求进入候选列表；本次首仓直接按所选资金比例计算张数，成交后由策略接管加仓、止损和退出。';
+    $('manual-entry-note').textContent = '不要求进入候选列表；本次首仓按所选资金比例计算张数，并以当前最优卖价作为买入限价提交 FOK，不按市价追单。成交后由策略接管加仓、止损和退出。';
   }
 }
 
@@ -170,7 +170,7 @@ async function submitManualEntry() {
       instrument,
       capital_fraction: percent / 100,
     });
-    $('manual-entry-note').textContent = `${instrument} 已提交（${percent}%），worker 将按当前价格核验后直接开仓。`;
+    $('manual-entry-note').textContent = `${instrument} 已提交（${percent}%），worker 将按当前最优卖价限价核验后提交。`;
   } catch (error) {
     $('manual-entry-note').textContent = '手动开仓失败：' + error.message;
   } finally {
