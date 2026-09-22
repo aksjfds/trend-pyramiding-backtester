@@ -76,14 +76,6 @@ class LiveConfig:
             raise ValueError("leverage must be an integer in [1, 125]")
         if isinstance(self.capital_fraction, bool) or not 0 < self.capital_fraction <= 1:
             raise ValueError("capital_fraction must be in (0, 1]")
-        if (
-            not isinstance(self.top_n, int)
-            or not 1 <= self.top_n <= 10
-            or len(set(self.instruments)) != len(self.instruments)
-        ):
-            raise ValueError("invalid universe")
-        if len(self.instruments) > 10:
-            raise ValueError("at most 10 instruments")
         if not 5 <= self.poll_seconds <= 60 or not 10 <= self.max_signal_age_seconds <= 300:
             raise ValueError("invalid polling or signal freshness settings")
         if not 0 <= self.max_entry_slippage_bps <= 50 or not 0 < self.max_spread_bps <= 50:
